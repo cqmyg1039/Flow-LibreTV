@@ -44,12 +44,6 @@
           "arch": [
             "x64"
           ]
-        },
-        {
-          "target": "portable",
-          "arch": [
-            "x64"
-          ]
         }
       ],
       "icon": "build/icon.ico"
@@ -58,9 +52,6 @@
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true
-    },
-    "portable": {
-      "artifactName": "${productName}-${version}-portable.${ext}"
     }
   },
   "dependencies": {

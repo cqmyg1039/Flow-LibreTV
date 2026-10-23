@@ -51,10 +51,8 @@
 1. `DOCKER_BUILD=1 npm run build` → `.next/standalone` + 拷 `static`
 2. `electron/` 目录：`main.js`（主进程）、`preload.js`（可选）
 3. package.json 增 `"main": "electron/main.js"` + `build`（electron-builder 配置）
-4. `electron-builder --win nsis` → 产出：
-   - `LibreTV-Setup-x.y.z.exe`（NSIS 安装包）
-   - `LibreTV-x.y.z-portable.exe`（免安装便携版，双击即用）
-5. 分发：GitHub Releases 附件 / 网盘直传家人
+4. `electron-builder --win nsis` → 产出 `LibreTV Setup-x.y.z.exe`（NSIS 安装包）
+5. 分发：GitHub Releases 附件（scripts/create-release.py 一键发布）
 
 ## 6. 国内构建环境（关键）
 
@@ -72,7 +70,7 @@
 | 包体积 ~120MB | Electron 自带 Chromium | 接受；压缩可选（仅生产调试需要时） |
 | 端口冲突 | 8899 被占用 | main.js 探测空闲端口再启动 server（server.js 支持 PORT env） |
 | 本地无 POSTGRES_URL | 桌面版历史同步自动降级（503→禁用） | 打包时 .env 预置 Neon 连接串，与网页版共享历史 |
-| 升级分发 | 打包新版本后重发 exe | 简单覆盖安装/便携版替换即可（一期不做自动更新） |
+| 升级分发 | 打包新版本后重发 exe | 简单覆盖安装即可（一期不做自动更新） |
 
 ## 8. 验收标准
 
@@ -86,8 +84,8 @@
 
 - [ ] `electron/main.js`：启动 standalone server + BrowserWindow + 退出清理 + 空闲端口探测
 - [ ] `electron/preload.js`：预留（版本信息展示等）
-- [ ] package.json：`main` 字段 + electron 相关 devDependencies + `build` 配置（win: nsis + portable，icon）
+- [ ] package.json：`main` 字段 + electron 相关 devDependencies + `build` 配置（win: nsis，icon）
 - [ ] `scripts/desktop-build.mjs`：standalone 构建 → 拷 static → electron-builder 打包（含国内镜像环境变量）
 - [ ] 图标：`build/icon.ico`（256×256，可用现有 Logo 生成）
-- [ ] 本机验证：安装包 + 便携版各跑一遍，通过验收标准
+- [ ] 本机验证：安装包跑一遍，通过验收标准
 - [ ] 提交本分支，产出 exe 附件/链接交付用户

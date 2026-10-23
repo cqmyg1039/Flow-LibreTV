@@ -4,8 +4,7 @@
  * 流程：
  *  1. DOCKER_BUILD=1 npm run build        → 生成 .next/standalone（含 server.js / .next / node_modules / .env）
  *  2. 拷贝 .next/static → standalone/.next/static（standalone 模式不自动包含静态资源）
- *  3. electron-builder --win              → 产出 release/LibreTV-Setup-x.y.z.exe（安装包）
- *                                             + release/LibreTV-x.y.z-portable.exe（免安装版）
+ *  3. electron-builder --win              → 产出 release/LibreTV Setup-x.y.z.exe（NSIS 安装包）
  *
  * 国内镜像已内置（npmmirror），避免 Electron/打包二进制下载超时。
  */
@@ -60,7 +59,7 @@ for (const mod of ['bufferutil', 'utf-8-validate']) {
   }
 }
 
-// 3. electron-builder 打包（nsis 安装包 + portable 免安装）
+// 3. electron-builder 打包（NSIS 安装包）
 run('npx', ['electron-builder', '--win']);
 
 // 4. 列出产物
