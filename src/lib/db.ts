@@ -35,6 +35,20 @@ export interface ProgressEntry {
   updatedAt: number;
 }
 
+/**
+ * 片头片尾跳过标记（整剧共享一条，episodeIndex 预留给「每集独立」二期）。
+ * opEnd：片头结束秒；edStart：片尾开始秒；0 = 未设置。
+ */
+export interface SkipPointEntry {
+  id: string; // `${sourceKey}_${vodId}`（或含 episodeIndex 的精确集条目，预留）
+  sourceKey: string;
+  vodId: string;
+  episodeIndex?: number;
+  opEnd: number;
+  edStart: number;
+  updatedAt: number;
+}
+
 export interface SearchHistoryEntry {
   text: string;
   timestamp: number;
@@ -77,6 +91,7 @@ export const db = new Dexie('libretv') as Dexie & {
   liveProbe: EntityTable<LiveProbeEntry & { url: string }, 'url'>;
   segmentMeta: EntityTable<SegmentMetaEntry, 'key'>;
   downloads: EntityTable<DownloadTaskEntry, 'id'>;
+  skipPoints: EntityTable<SkipPointEntry, 'id'>;
 };
 
 db.version(1).stores({
@@ -94,6 +109,11 @@ db.version(2).stores({
 db.version(3).stores({
   segmentMeta: 'key, episodeKey, lastAccess',
   downloads: 'id, createdAt',
+});
+
+// v4：片头片尾跳过标记（整剧共享条目；episodeIndex 精确集条目为二期预留）
+db.version(4).stores({
+  skipPoints: 'id, sourceKey',
 });
 
 export const MAX_HISTORY = 100;
@@ -163,6 +183,57 @@ export async function clearProgress(sourceKey: string, vodId: string, episodeInd
   await db.progress.delete(progressKeyOf(sourceKey, vodId, episodeIndex));
 }
 
+// —— 片头片尾跳过标记 ——
+
+/** 条目主键：缺省 episodeIndex 为整剧共享条目 */
+export function skipPointIdOf(sourceKey: string, vodId: string, episodeIndex?: number): string {
+  return episodeIndex == null ? `${sourceKey}_${vodId}` : `${sourceKey}_${vodId}_${episodeIndex}`;
+}
+
+/**
+ * 读取某集生效的跳过标记：优先精确集条目，其次整剧共享条目；均无返回 null。
+ */
+export async function getSkipPoints(
+  sourceKey: string,
+  vodId: string,
+  episodeIndex?: number
+): Promise<SkipPointEntry | null> {
+  if (episodeIndex != null) {
+    const exact = await db.skipPoints.get(skipPointIdOf(sourceKey, vodId, episodeIndex));
+    if (exact) return exact;
+  }
+  return (await db.skipPoints.get(skipPointIdOf(sourceKey, vodId))) ?? null;
+}
+
+/** 写入（整剧共享）跳过标记：部分字段更新，未设置的字段保持原值或 0 */
+export async function saveSkipPoints(
+  sourceKey: string,
+  vodId: string,
+  patch: Partial<Pick<SkipPointEntry, 'opEnd' | 'edStart'>>,
+  episodeIndex?: number
+): Promise<SkipPointEntry> {
+  const id = skipPointIdOf(sourceKey, vodId, episodeIndex);
+  const existing = await db.skipPoints.get(id);
+  const merged: SkipPointEntry = {
+    sourceKey,
+    vodId,
+    ...(episodeIndex != null ? { episodeIndex } : null),
+    opEnd: 0,
+    edStart: 0,
+    ...existing,
+    ...patch,
+    id,
+    updatedAt: Date.now(),
+  };
+  await db.skipPoints.put(merged);
+  return merged;
+}
+
+/** 删除某剧（或某集）的跳过标记 */
+export async function deleteSkipPoints(sourceKey: string, vodId: string, episodeIndex?: number): Promise<void> {
+  await db.skipPoints.delete(skipPointIdOf(sourceKey, vodId, episodeIndex));
+}
+
 export async function addSearchHistory(text: string): Promise<void> {
   const t = text.trim().slice(0, 50);
   if (!t) return;
@@ -212,10 +283,12 @@ export async function exportConfig(): Promise<string> {
   // 导出前 flush：把节流缓冲中的最新设置落盘，避免导出的是 800ms 前的旧快照
   flushPendingPersist();
   const history = await db.history.toArray();
+  const skipPoints = await db.skipPoints.toArray();
   const settings = localStorage.getItem(PERSIST_KEY);
 
   const data: Record<string, unknown> = {
     viewingHistory: JSON.stringify(history),
+    skipPoints: JSON.stringify(skipPoints),
   };
   if (settings) data[PERSIST_KEY] = settings;
 
@@ -260,6 +333,23 @@ export async function importConfig(content: string): Promise<void> {
         playbackPosition: typeof item.playbackPosition === 'number' ? item.playbackPosition : 0,
         duration: typeof item.duration === 'number' ? item.duration : 0,
         timestamp: typeof item.timestamp === 'number' ? item.timestamp : Date.now(),
+      });
+    }
+  }
+
+  // 片头片尾跳过标记（新版导出才有；旧配置缺失时跳过）
+  if (typeof data['skipPoints'] === 'string') {
+    const skipPoints = JSON.parse(data['skipPoints']) as SkipPointEntry[];
+    for (const entry of skipPoints.slice(0, 500)) {
+      if (!entry.sourceKey || !entry.vodId) continue;
+      await db.skipPoints.put({
+        id: entry.id || skipPointIdOf(entry.sourceKey, entry.vodId, entry.episodeIndex),
+        sourceKey: entry.sourceKey,
+        vodId: entry.vodId,
+        ...(entry.episodeIndex != null ? { episodeIndex: entry.episodeIndex } : null),
+        opEnd: typeof entry.opEnd === 'number' ? entry.opEnd : 0,
+        edStart: typeof entry.edStart === 'number' ? entry.edStart : 0,
+        updatedAt: typeof entry.updatedAt === 'number' ? entry.updatedAt : Date.now(),
       });
     }
   }

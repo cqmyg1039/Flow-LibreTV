@@ -28,6 +28,8 @@ import {
   saveProgress,
   updateHistoryProgress,
   upsertHistory,
+  getSkipPoints,
+  saveSkipPoints,
   db,
 } from '@/lib/db';
 import { cn } from '@/lib/utils';
@@ -110,6 +112,44 @@ function WatchContent() {
     return entry?.position ?? 0;
   }, [searchParams, sourceKey, vodId, currentIndex]);
 
+  // —— 片头片尾跳过标记：按当前集读取（精确集 → 整剧共享），换集时重读 ——
+  const [skipPoints, setSkipPoints] = useState<{ opEnd: number; edStart: number } | null>(null);
+  useEffect(() => {
+    let alive = true;
+    if (!sourceKey || !vodId) {
+      setSkipPoints(null);
+      return;
+    }
+    getSkipPoints(sourceKey, vodId, currentIndex)
+      .then((e) => {
+        if (alive) setSkipPoints(e ? { opEnd: e.opEnd, edStart: e.edStart } : null);
+      })
+      .catch(() => {
+        if (alive) setSkipPoints(null);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [sourceKey, vodId, currentIndex]);
+
+  // 标记当前位置为片头结束点 / 片尾开始点（整剧共享，标记后同页立即生效）
+  const handleMarkSkipPoint = useCallback(
+    (type: 'op' | 'ed', time: number) => {
+      if (!sourceKey || !vodId) return;
+      const t = Math.max(0, Math.round(time));
+      getSkipPoints(sourceKey, vodId)
+        .then((existing) =>
+          saveSkipPoints(sourceKey, vodId, {
+            opEnd: type === 'op' ? t : existing?.opEnd ?? 0,
+            edStart: type === 'ed' ? t : existing?.edStart ?? 0,
+          })
+        )
+        .then((saved) => setSkipPoints({ opEnd: saved.opEnd, edStart: saved.edStart }))
+        .catch(() => {});
+    },
+    [sourceKey, vodId]
+  );
+
   // 写入观看历史（进入页面即记录，进度后续增量更新）
   useEffect(() => {
     if (!verified || !sourceKey || !currentUrl) return;
@@ -154,6 +194,14 @@ function WatchContent() {
       autoNextTimer.current = setTimeout(() => goEpisode(currentIndex + 1), 800);
     }
   }, [store.autoplayNext, currentIndex, episodes.length, goEpisode, sourceKey, vodId]);
+
+  // 片尾跳过：连播开且有下一集 → 提前切集（不等 ended 的 800ms）；否则不打断播放
+  const handleSkipEd = useCallback(() => {
+    if (store.autoplayNext && currentIndex < episodes.length - 1) {
+      if (autoNextTimer.current) clearTimeout(autoNextTimer.current);
+      goEpisode(currentIndex + 1);
+    }
+  }, [store.autoplayNext, currentIndex, episodes.length, goEpisode]);
 
   // Alt+←/→ 集数切换快捷键
   useEffect(() => {
@@ -249,6 +297,12 @@ function WatchContent() {
                   onTimeUpdate={handleProgress}
                   onPause={handleProgress}
                   onEnded={handleEnded}
+                  skipOp={store.skipOp}
+                  skipEd={store.skipEd}
+                  opEnd={skipPoints?.opEnd ?? 0}
+                  edStart={skipPoints?.edStart ?? 0}
+                  onSkipEd={handleSkipEd}
+                  onMarkSkipPoint={handleMarkSkipPoint}
                   hasPrevEpisode={currentIndex > 0}
                   hasNextEpisode={episodes.length > 0 && currentIndex < episodes.length - 1}
                   onPrevEpisode={() => goEpisode(currentIndex - 1)}
@@ -343,7 +397,7 @@ function WatchContent() {
               </div>
             )}
             <p className="hidden md:block text-[10px] text-faint mt-3 leading-relaxed">
-              快捷键：空格 播放/暂停 · ←/→ 快退/快进 5s · ↑/↓ 音量 · F 全屏 · Alt+←/→ 切换集数
+              快捷键：空格 播放/暂停 · ←/→ 快退/快进 5s · ↑/↓ 音量 · F 全屏 · Alt+←/→ 切换集数 · T 标记片头 · Y 标记片尾 · H 跳过片头
             </p>
           </aside>
         </div>

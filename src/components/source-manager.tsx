@@ -574,6 +574,18 @@ function PlaybackPanel() {
           checked={store.autoplayNext}
           onChange={(v) => store.updateSettings({ autoplayNext: v })}
         />
+        <ToggleRow
+          label="自动跳过片头"
+          description="自然播放跨过片头结束点时自动跳到正片（拖拽/回看不触发）；播放页按 T 标记片头结束点"
+          checked={store.skipOp}
+          onChange={(v) => store.updateSettings({ skipOp: v })}
+        />
+        <ToggleRow
+          label="自动跳过片尾"
+          description="跨过片尾开始点时自动连播则提前切下一集；播放页按 Y 标记片尾开始点"
+          checked={store.skipEd}
+          onChange={(v) => store.updateSettings({ skipEd: v })}
+        />
       </div>
       <VideoCachePanel />
     </section>
