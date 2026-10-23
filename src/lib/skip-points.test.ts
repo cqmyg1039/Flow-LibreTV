@@ -5,6 +5,7 @@ import {
   shouldSkipOp,
   shouldTriggerEd,
   isInOpRange,
+  skipZoneOf,
 } from './skip-points';
 
 describe('normalizeSkipPoints', () => {
@@ -77,5 +78,33 @@ describe('isInOpRange', () => {
     expect(isInOpRange(75, 76)).toBe(false);
     expect(isInOpRange(0, 30)).toBe(false);
     expect(isInOpRange(75, 0)).toBe(false);
+  });
+});
+
+describe('skipZoneOf', () => {
+  const DUR = 2880;
+
+  it('片头区间内返回 op', () => {
+    expect(skipZoneOf(75, 2760, 30, DUR)).toBe('op');
+    expect(skipZoneOf(75, 2760, 0.5, DUR)).toBe('op');
+  });
+
+  it('片尾区间内返回 ed', () => {
+    expect(skipZoneOf(75, 2760, 2770, DUR)).toBe('ed');
+    expect(skipZoneOf(75, 2760, 2760, DUR)).toBe('ed');
+  });
+
+  it('正片区间（opEnd 之后、edStart 之前）返回 null', () => {
+    expect(skipZoneOf(75, 2760, 100, DUR)).toBeNull();
+  });
+
+  it('片尾距结尾不足 5s 视为自然结束返回 null', () => {
+    expect(skipZoneOf(75, 2760, 2876, DUR)).toBeNull();
+  });
+
+  it('短视频或非法标记返回 null', () => {
+    expect(skipZoneOf(75, 2760, 30, MIN_SKIP_EPISODE_SECONDS - 1)).toBeNull();
+    expect(skipZoneOf(0, 0, 30, DUR)).toBeNull();
+    expect(skipZoneOf(130, 0, 30, 200)).toBeNull();
   });
 });

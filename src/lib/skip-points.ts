@@ -57,3 +57,19 @@ export function shouldTriggerEd(edStart: number, prevTime: number, curTime: numb
 export function isInOpRange(opEnd: number, saved: number): boolean {
   return opEnd > 0 && saved > 0 && saved < opEnd;
 }
+
+/** 当前播放位置所处的「可手动跳过」区间：片头区 / 片尾区 / 无 */
+export type SkipZone = 'op' | 'ed' | null;
+
+/**
+ * 按钮显隐判定：仅在对应区间内停留时显示「跳过片头 / 跳过片尾」按钮。
+ * - 片头区：0 < cur < opEnd（正在播片头）
+ * - 片尾区：cur >= edStart 且距结尾仍 > MIN_ED_TAIL_SECONDS（片尾尚未自然结束）
+ * 归一化后标记非法（含短视频）时一律返回 null。
+ */
+export function skipZoneOf(opEnd: number, edStart: number, curTime: number, duration: number): SkipZone {
+  const pts = normalizeSkipPoints(opEnd, edStart, duration);
+  if (pts.opEnd > 0 && curTime > 0 && curTime < pts.opEnd) return 'op';
+  if (pts.edStart > 0 && curTime >= pts.edStart && duration - curTime >= MIN_ED_TAIL_SECONDS) return 'ed';
+  return null;
+}

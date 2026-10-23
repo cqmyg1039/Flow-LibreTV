@@ -1,6 +1,6 @@
 # 片头片尾跳过（OP/ED Skip）功能设计
 
-> 状态：已确认方案，实现中（2026-10-23）
+> 状态：v1 已实现并上线；v2 优化已实现（2026-10-23）
 > 目标版本：LibreTV v2.19.7（Next.js 15 + TypeScript + ArtPlayer + hls.js + Dexie）
 > 决策记录见文末「已确认决策」。
 
@@ -164,6 +164,45 @@ onMarkSkipPoint?: (type: 'op' | 'ed', time: number) => void; // 标记当前位�
 | --- | --- | --- |
 | 1 | 片尾行为（连播开） | 到 ED 起点提前切下一集（不等 ended 的 800ms） |
 | 2 | 片尾行为（连播关） | 不打断播放，仅顶部提示 |
-| 3 | 全局开关默认值 | `skipOp` / `skipEd` 默认 false，控制栏按钮不受开关限制 |
+| 3 | 全局开关默认值 | v1：默认 false；**v2：改为默认开启**——仅对「已标记」剧集生效，未标记剧完全不受影响，家人使用开箱即得（见 §11.3） |
 | 4 | 标记粒度 | 整部剧共享一套（每集独立留待二期） |
 | 5 | 自动跳转前提 | 仅单调前进（自然播放）触发，拖拽/回看永不误跳 |
+
+## 11. v2 优化（进度条标记 + 按钮智能显隐 + 默认开启）
+
+### 11.1 进度条区间标记
+
+新增一个渲染进 ArtPlayer 进度条容器（`position: 'top'` 控件挂载到 `.art-control-progress`）的纯视觉控件 `skip-marks`：
+
+- **OP 区间**：`[0, opEnd)` 绿色半透明色块（`rgba(34,197,94,0.5)`），右缘带 1.5px 白色边界线
+- **ED 区间**：`[edStart, duration)` 红色半透明色块（`rgba(239,68,68,0.45)`），左缘带 1.5px 白色边界线
+- 容器 `pointer-events: none`，不拦截进度条拖拽 / 点击
+- 定位由 `renderSkipMarks(duration)` 按 `opEnd/duration`、`edStart/duration` 计算百分比；参数指纹（`opEnd|edStart|duration`）不变时跳过 DOM 写入，避免 timeupdate 高频空转
+- duration 就绪前（元数据未加载）不渲染，`[opEnd, edStart, url]` effect 与 timeupdate 双入口兜底
+
+### 11.2 手动按钮智能显隐
+
+v1 按「有标记即常驻显示」两个按钮，视觉冗余。v2 改为**仅停留在对应区间时出现**：
+
+| 播放位置 | 显示 |
+| --- | --- |
+| `0 < cur < opEnd`（正在播片头） | 「跳过片头」按钮 |
+| `cur >= edStart` 且距结尾 > 5s（片尾区） | 「跳过片尾」按钮 |
+| 正片区间 / 无标记 / 短视频 | 两个按钮均隐藏 |
+
+判定复用纯函数 `skipZoneOf(opEnd, edStart, cur, duration): 'op' | 'ed' | null`（归一化后判断），按钮显隐在**区间切换时**才调用 `controls.update`（`lastSkipZoneRef` 去重）。自动跳过开启时自然播放会直接跳走，按钮只在暂停 / 拖回 / 关闭自动跳等场景作为兜底出现。
+
+### 11.3 自动跳过默认开启
+
+`skipOp` / `skipEd` 默认值由 `false` 改为 `true`。安全性依据：判定依赖 `normalizeSkipPoints` 归一化，**未标记（0）或非法标记一律不触发**；短视频（<90s）整体禁用。即默认开启只影响「主动标记过的剧集」，家人使用无需进设置。
+
+### 11.4 v2 落点
+
+| 文件 | 改动 |
+| --- | --- |
+| `src/lib/skip-points.ts` | 新增 `skipZoneOf` + `SkipZone` 类型 |
+| `src/lib/skip-points.test.ts` | 新增 5 项单测（片头区 / 片尾区 / 正片 / 片尾尾差 <5s / 非法标记） |
+| `src/components/player-shell.tsx` | `skip-marks` 进度条控件、`renderSkipMarks`、`updateSkipButtons`、`updateSkipUI`（timeupdate 驱动）、按钮显隐 effect 改造 |
+| `src/lib/store.ts` | `skipOp` / `skipEd` 默认 `true` |
+| `src/components/source-manager.tsx` | 开关描述补充进度条颜色提示 |
+| `src/app/watch/page.tsx` | 快捷键提示补充「片头绿 / 片尾红显示在进度条」 |

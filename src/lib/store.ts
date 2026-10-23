@@ -309,9 +309,10 @@ export const useAppStore = create<AppState>()(
       recommendSource: 'hot-list',
       recommendSourceTouched: false,
       autoplayNext: true,
-      // 片头片尾跳过默认关闭（避免误伤：用户可能故意看片头）；控制栏按钮不受开关限制
-      skipOp: false,
-      skipEd: false,
+      // 片头片尾自动跳过默认开启：仅对「已标记」的剧集生效（未标记的剧完全不受影响），
+      // 家人使用开箱即得；标记方法见播放页快捷键 T/Y 与进度条区间标记
+      skipOp: true,
+      skipEd: true,
       // 直连优先：豆瓣封面有公共镜像 + 内置代理两级兜底（见 buildImageCandidates），
       // 默认省服务器流量；老用户保持已持久化的选择不受影响。
       // 部署者可用 DEFAULT_IMAGE_MODE=proxy 下发内置代理优先（最稳定，吃服务器流量）

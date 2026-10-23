@@ -13,7 +13,7 @@ import {
 import { loadCacheSettings } from '@/lib/video-cache';
 import { formatTime } from '@/lib/utils';
 import { prefersTouchPointer } from '@/lib/touch-pointer';
-import { normalizeSkipPoints, shouldSkipOp, shouldTriggerEd, isInOpRange } from '@/lib/skip-points';
+import { normalizeSkipPoints, shouldSkipOp, shouldTriggerEd, isInOpRange, skipZoneOf, type SkipZone } from '@/lib/skip-points';
 import {
   ART_DEFAULT_CONTROL_HIDE_MS,
   DESKTOP_CONTROL_HIDE_MS,
@@ -148,11 +148,66 @@ export function PlayerShell({
   // 片头片尾跳过：上次 timeupdate 的播放位置基准，用于「单调前进」判定（拖拽/回看不误跳）。
   // 换集必须重置为 0，否则沿用上一集的时间戳会把新集的片头判定一起吞掉
   const lastPlaybackTimeRef = useRef(0);
+  // 跳过按钮当前显示的区间（op/ed/null），仅区间切换时才触碰 controls API
+  const lastSkipZoneRef = useRef<SkipZone>(null);
+  // 进度条标记上次渲染时的参数指纹，避免 timeupdate 里重复写 DOM
+  const lastMarksKeyRef = useRef('');
 
   const showHint = (text: string) => {
     setHint(text);
     if (hintTimerRef.current) clearTimeout(hintTimerRef.current);
     hintTimerRef.current = setTimeout(() => setHint(''), 2500);
+  };
+
+  /** 进度条区间标记定位：依赖 duration（元数据就绪后才有），参数无变化时不重写 DOM */
+  const renderSkipMarks = (duration: number) => {
+    const p = propsRef.current;
+    const key = `${p.opEnd ?? 0}|${p.edStart ?? 0}|${duration}`;
+    if (key === lastMarksKeyRef.current) return;
+    lastMarksKeyRef.current = key;
+    const marks = containerRef.current?.querySelector<HTMLElement>('.art-skip-marks');
+    if (!marks) return;
+    const pts = normalizeSkipPoints(p.opEnd ?? 0, p.edStart ?? 0, duration);
+    const op = marks.querySelector<HTMLElement>('.art-skip-op');
+    const ed = marks.querySelector<HTMLElement>('.art-skip-ed');
+    if (!op || !ed) return;
+    if (pts.opEnd > 0) {
+      op.style.display = 'block';
+      op.style.width = `${(pts.opEnd / duration) * 100}%`;
+    } else {
+      op.style.display = 'none';
+    }
+    if (pts.edStart > 0) {
+      ed.style.display = 'block';
+      ed.style.left = `${(pts.edStart / duration) * 100}%`;
+      ed.style.width = `${((duration - pts.edStart) / duration) * 100}%`;
+    } else {
+      ed.style.display = 'none';
+    }
+  };
+
+  /** 跳过按钮智能显隐：只在对应区间停留时出现，平时不占控制栏（区间切换时才更新样式） */
+  const updateSkipButtons = (zone: SkipZone) => {
+    if (zone === lastSkipZoneRef.current) return;
+    lastSkipZoneRef.current = zone;
+    const controls = artRef.current?.controls;
+    if (!controls) return;
+    controls.update({
+      name: 'skip-op',
+      style: { display: zone === 'op' ? 'inline-flex' : 'none' },
+    });
+    controls.update({
+      name: 'skip-ed',
+      style: { display: zone === 'ed' ? 'inline-flex' : 'none' },
+    });
+  };
+
+  /** 播放位置驱动：标记定位 + 按钮显隐，一次计算 */
+  const updateSkipUI = (cur: number, duration: number) => {
+    if (!Number.isFinite(duration) || duration <= 0) return;
+    const p = propsRef.current;
+    renderSkipMarks(duration);
+    updateSkipButtons(skipZoneOf(p.opEnd ?? 0, p.edStart ?? 0, cur, duration));
   };
 
   // 片段缓存开启时调大 hls.js 自身缓冲，缓冲之外的空窗由预取器补齐
@@ -409,6 +464,18 @@ export function PlayerShell({
       // 上/下集放在播放键右侧：换集是看剧最高频的动作，不该让用户滚回页面下方找按钮
       controls: [
         {
+          // 进度条上的片头片尾区间标记（渲染进 .art-control-progress，纯视觉，不拦截交互）。
+          // OP 绿色色块 [0, opEnd)、ED 红色色块 [edStart, duration]，位置由 renderSkipMarks 动态更新
+          name: 'skip-marks',
+          position: 'top',
+          index: 8,
+          html:
+            '<div class="art-skip-marks" style="position:absolute;top:0;left:0;right:0;bottom:0;pointer-events:none;">' +
+            '<i class="art-skip-op" style="position:absolute;top:0;left:0;height:100%;pointer-events:none;display:none;background:rgba(34,197,94,0.5);border-right:1.5px solid rgba(255,255,255,0.9);"></i>' +
+            '<i class="art-skip-ed" style="position:absolute;top:0;height:100%;pointer-events:none;display:none;background:rgba(239,68,68,0.45);border-left:1.5px solid rgba(255,255,255,0.9);"></i>' +
+            '</div>',
+        },
+        {
           name: 'skip-op',
           index: 9,
           position: 'left',
@@ -524,6 +591,8 @@ export function PlayerShell({
         }
       }
       lastPlaybackTimeRef.current = cur;
+      // 进度条标记定位 + 跳过按钮显隐（同一帧计算，内部按参数指纹去重）
+      updateSkipUI(cur, art.duration);
 
       const now = Date.now();
       if (now - lastSave > 5000) {
@@ -730,18 +799,17 @@ export function PlayerShell({
     });
   }, [hasPrevEpisode, hasNextEpisode, url]);
 
-  // —— 片头片尾跳过按钮显隐：有对应标记才显示（标记在剧集粒度生效） ——
+  // —— 片头片尾跳过按钮：默认隐藏，播放位置进入对应区间时由 timeupdate 驱动显隐 ——
   useEffect(() => {
     const controls = artRef.current?.controls;
     if (!controls) return;
-    controls.update({
-      name: 'skip-op',
-      style: { display: (opEnd ?? 0) > 0 ? 'inline-flex' : 'none' },
-    });
-    controls.update({
-      name: 'skip-ed',
-      style: { display: (edStart ?? 0) > 0 ? 'inline-flex' : 'none' },
-    });
+    controls.update({ name: 'skip-op', style: { display: 'none' } });
+    controls.update({ name: 'skip-ed', style: { display: 'none' } });
+    // 换集/标记变化时重置缓存，让 timeupdate 重新计算标记与按钮状态
+    lastSkipZoneRef.current = null;
+    lastMarksKeyRef.current = '';
+    const dur = artRef.current?.duration ?? 0;
+    if (Number.isFinite(dur) && dur > 0) renderSkipMarks(dur);
   }, [opEnd, edStart, url]);
 
   // —— 换集：仅切换 HLS 源，不重建播放器（保留网页全屏等状态） ——

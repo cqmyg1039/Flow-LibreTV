@@ -398,6 +398,8 @@ function WatchContent() {
             )}
             <p className="hidden md:block text-[10px] text-faint mt-3 leading-relaxed">
               快捷键：空格 播放/暂停 · ←/→ 快退/快进 5s · ↑/↓ 音量 · F 全屏 · Alt+←/→ 切换集数 · T 标记片头 · Y 标记片尾 · H 跳过片头
+              <br />
+              片头（绿）/ 片尾（红）区间显示在播放进度条上；开启自动跳过时自然播放会自动跳过
             </p>
           </aside>
         </div>
