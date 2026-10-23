@@ -14,3 +14,6 @@ vitest-results.json
 generated-images/
 .vercel
 .env*
+
+# 桌面版打包产物（体积大，不入库，按需上传分发）
+release/
