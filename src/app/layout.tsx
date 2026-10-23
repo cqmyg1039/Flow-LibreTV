@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from 'next';
 import './globals.css';
 import { Providers } from '@/components/providers';
+import { Analytics } from '@vercel/analytics/react';
 
 export const metadata: Metadata = {
   title: {
@@ -43,6 +44,8 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       </head>
       <body>
         <Providers>{children}</Providers>
+        {/* Vercel Web Analytics：自动上报页面浏览量 + Web Vitals（需在 Vercel 控制台开启 Analytics） */}
+        <Analytics />
       </body>
     </html>
   );
