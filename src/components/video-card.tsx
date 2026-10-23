@@ -395,6 +395,11 @@ export function VideoCard({ item, onClick }: { item: SearchResultItem; onClick: 
 
 /** 豆瓣推荐卡片（无来源徽章，点击直接搜索） */
 export function DoubanCard({ item, onClick }: { item: { title: string; cover: string; rating?: string }; onClick: () => void }) {
+  const imageProxyMode = useAppStore((s) => s.imageProxyMode);
+  const customImageProxy = useAppStore((s) => s.customImageProxy);
+  const [imgFailed, setImgFailed] = useState(false);
+  useEffect(() => setImgFailed(false), [item.cover]);
+
   return (
     <div
       className="card cursor-pointer hover:scale-[1.03] hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
@@ -409,12 +414,23 @@ export function DoubanCard({ item, onClick }: { item: { title: string; cover: st
         }
       }}
     >
-      <div className="relative aspect-[2/3] overflow-hidden bg-gradient-to-br from-slate-800 via-slate-900 to-slate-950 flex items-center justify-center">
-        {/* 文字封面：豆瓣图床对外域/无 Referer 请求返回 418，改用标题首字文字卡，彻底绕开图床防盗链 */}
-        <span className="text-4xl font-bold tracking-wider text-accent/70 select-none leading-none">
-          {item.title.slice(0, 2)}
-        </span>
-        <div className="absolute inset-x-0 bottom-0 h-1/3 bg-gradient-to-t from-black/70 to-transparent" />
+      <div className="relative aspect-[2/3] bg-chip">
+        {item.cover && !imgFailed ? (
+          <SmartImage
+            url={item.cover}
+            mode={imageProxyMode}
+            customProxy={customImageProxy}
+            alt={item.title}
+            className="w-full h-full object-cover"
+            onExhausted={() => setImgFailed(true)}
+          />
+        ) : (
+          <div className="w-full h-full flex items-center justify-center bg-chip">
+            <svg className="w-8 h-8 text-faint" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M7 4v16m10-16v16M3 6a1 1 0 011-1h1a1 1 0 011 1v12a1 1 0 01-1 1H4a1 1 0 01-1-1V6zm4 0a1 1 0 011-1h1a1 1 0 011 1v12a1 1 0 01-1 1h-1a1 1 0 01-1-1V6zm8 0a1 1 0 011-1h1a1 1 0 011 1v12a1 1 0 01-1 1h-1a1 1 0 01-1-1V6zm4 0a1 1 0 011-1h1a1 1 0 011 1v12a1 1 0 01-1 1h-1a1 1 0 01-1-1V6z" />
+            </svg>
+          </div>
+        )}
         {item.rating && (
           <span className={cn('absolute top-1.5 right-1.5 tag bg-black/70 text-rating font-medium')}>
             ★ {item.rating}
