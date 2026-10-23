@@ -32,7 +32,8 @@ import {
   saveSkipPoints,
   db,
 } from '@/lib/db';
-import { cn } from '@/lib/utils';
+import { syncPull } from '@/lib/history-sync';
+import { cn, formatTime } from '@/lib/utils';
 
 /**
  * 播放页（唯一入口，替代旧版 watch.html → player.html 跳转链）。
@@ -98,19 +99,43 @@ function WatchContent() {
       sp.set('index', String(index));
       sp.set('url', episodes[index] || directUrl);
       sp.delete('position');
+      sp.delete('norestore');
+      setResumeInfo(null);
       router.replace(`/watch?${sp.toString()}`, { scroll: false });
     },
     [router, searchParams, episodes, directUrl]
   );
 
-  // 进度恢复优先级：URL position 参数 > IndexedDB 记录
+  // 续播提示：换设备/换集后由 getRestorePosition 检测到有效进度时设置
+  const [resumeInfo, setResumeInfo] = useState<{ position: number; duration: number } | null>(null);
+
+  /**
+   * 进度恢复优先级：URL position > 云端同步后 IndexedDB 记录。
+   * 换设备场景：先 syncPull 把云端进度拉回本地（1500ms 超时，失败静默），
+   * 再读本地进度，保证新设备也能从上次看到的位置继续。
+   */
   const getRestorePosition = useCallback(async () => {
+    if (searchParams.get('norestore') === '1') return 0;
     const urlPos = parseInt(searchParams.get('position') || '0', 10) || 0;
     if (urlPos > 0) return urlPos;
     if (!vodId) return 0;
+    await syncPull({ timeoutMs: 1500 }).catch(() => {});
     const entry = await db.progress.get(progressKeyOf(sourceKey, vodId, currentIndex));
-    return entry?.position ?? 0;
+    const pos = entry?.position ?? 0;
+    if (entry && pos > 10 && entry.duration > 0 && pos < entry.duration * 0.95) {
+      setResumeInfo({ position: pos, duration: entry.duration });
+    }
+    return pos;
   }, [searchParams, sourceKey, vodId, currentIndex]);
+
+  // 从头播放：整页重载并带上 norestore=1，播放器跳过进度恢复
+  const restartFromBeginning = useCallback(() => {
+    const sp = new URLSearchParams(searchParams.toString());
+    sp.set('norestore', '1');
+    sp.delete('position');
+    setResumeInfo(null);
+    window.location.assign(`/watch?${sp.toString()}`);
+  }, [searchParams]);
 
   // —— 片头片尾跳过标记：按当前集读取（精确集 → 整剧共享），换集时重读 ——
   const [skipPoints, setSkipPoints] = useState<{ opEnd: number; edStart: number } | null>(null);
@@ -283,7 +308,29 @@ function WatchContent() {
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 py-4">
         <div className="grid grid-cols-1 lg:grid-cols-[1fr_300px] gap-4">
           <div>
-            <div className="aspect-video bg-black rounded-lg overflow-hidden">
+            <div className="aspect-video bg-black rounded-lg overflow-hidden relative">
+              {resumeInfo && (
+                <div className="absolute top-3 left-1/2 -translate-x-1/2 z-30 flex items-center gap-3 bg-black/75 text-white text-xs px-4 py-2 rounded-full backdrop-blur shadow-lg">
+                  <span>
+                    已从上次 <span className="text-accent font-medium">{formatTime(resumeInfo.position)}</span> 继续播放
+                  </span>
+                  <button
+                    type="button"
+                    className="underline decoration-dotted underline-offset-2 hover:text-accent transition-colors"
+                    onClick={restartFromBeginning}
+                  >
+                    从头播放
+                  </button>
+                  <button
+                    type="button"
+                    className="text-white/60 hover:text-white transition-colors"
+                    aria-label="关闭续播提示"
+                    onClick={() => setResumeInfo(null)}
+                  >
+                    ✕
+                  </button>
+                </div>
+              )}
               {currentUrl ? (
                 <PlayerShell
                   url={currentUrl}

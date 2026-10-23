@@ -137,6 +137,8 @@ export async function upsertHistory(entry: Omit<HistoryEntry, 'id'>): Promise<vo
     const oldest = await db.history.orderBy('timestamp').limit(count - MAX_HISTORY).toArray();
     await db.history.bulkDelete(oldest.map((o) => o.id));
   }
+  // 跨设备同步：推送到云端（动态 import 避免与 history-sync 的运行时循环）
+  void import('./history-sync').then((m) => m.enqueueHistoryEntry(merged)).catch(() => {});
 }
 
 export async function updateHistoryProgress(
@@ -154,15 +156,26 @@ export async function updateHistoryProgress(
     duration,
     timestamp: Date.now(),
   });
+  const synced: HistoryEntry = {
+    ...existing,
+    id,
+    playbackPosition: position,
+    duration,
+    timestamp: Date.now(),
+  };
+  void import('./history-sync').then((m) => m.enqueueHistoryEntry(synced)).catch(() => {});
 }
 
 export async function removeHistory(sourceKey: string, vodId: string): Promise<void> {
-  await db.history.delete(`${sourceKey}_${vodId}`);
+  const id = `${sourceKey}_${vodId}`;
+  await db.history.delete(id);
+  void import('./history-sync').then((m) => m.enqueueHistoryDelete(id)).catch(() => {});
 }
 
 export async function clearAllHistory(): Promise<void> {
   // 一并清进度表：否则从历史重新打开时可能取到已清空的旧进度
   await Promise.all([db.history.clear(), db.progress.clear()]);
+  void import('./history-sync').then((m) => m.enqueueHistoryClear()).catch(() => {});
 }
 
 export function progressKeyOf(sourceKey: string, vodId: string, episodeIndex: number): string {
@@ -171,16 +184,20 @@ export function progressKeyOf(sourceKey: string, vodId: string, episodeIndex: nu
 
 export async function saveProgress(sourceKey: string, vodId: string, episodeIndex: number, position: number, duration: number): Promise<void> {
   if (!duration || position < 1) return;
-  await db.progress.put({
+  const entry: ProgressEntry = {
     key: progressKeyOf(sourceKey, vodId, episodeIndex),
     position,
     duration,
     updatedAt: Date.now(),
-  });
+  };
+  await db.progress.put(entry);
+  void import('./history-sync').then((m) => m.enqueueProgressEntry(entry)).catch(() => {});
 }
 
 export async function clearProgress(sourceKey: string, vodId: string, episodeIndex: number): Promise<void> {
-  await db.progress.delete(progressKeyOf(sourceKey, vodId, episodeIndex));
+  const key = progressKeyOf(sourceKey, vodId, episodeIndex);
+  await db.progress.delete(key);
+  void import('./history-sync').then((m) => m.enqueueProgressDelete(key)).catch(() => {});
 }
 
 // —— 片头片尾跳过标记 ——

@@ -19,6 +19,7 @@ import {
 import { buildWatchUrl, cn, formatRelativeTime, formatTime } from '@/lib/utils';
 import { useToast } from './toast';
 import { resolveSource, useAppStore } from '@/lib/store';
+import { syncPull } from '@/lib/history-sync';
 
 /**
  * 观看历史面板（IndexedDB 实时查询）。
@@ -42,6 +43,11 @@ export function HistoryPanel({ open, onClose }: { open: boolean; onClose: () => 
   // 关闭后重置搜索词：下次打开回到完整列表，不残留上次的过滤状态
   useEffect(() => {
     if (!open) setQuery('');
+  }, [open]);
+
+  // 打开面板时拉取云端历史/进度并合并到本地（跨设备同步；失败静默，本地照常用）
+  useEffect(() => {
+    if (open) void syncPull().catch(() => {});
   }, [open]);
 
   const keyword = query.trim().toLowerCase();
