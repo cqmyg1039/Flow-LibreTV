@@ -98,6 +98,31 @@ describe('VideoPrefetcher.ensure 幂等', () => {
     pf.ensure({ m3u8Url: M3U8_URL, currentTime, episodeKey: 's:v:0', horizonSeconds: 300 });
   }
 
+  it('defaults to one in-flight background segment request', async () => {
+    const { segUrls, release } = makePrefetcher({ holdSegments: true });
+    const pf = new VideoPrefetcher();
+    ensureAt(pf, 0);
+    await vi.waitFor(() => expect(segUrls).toHaveLength(1));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(segUrls).toHaveLength(1);
+    pf.stop();
+    release();
+  });
+
+  it('does not start another request when stopped while throttled', async () => {
+    const { segUrls, release } = makePrefetcher();
+    const pf = new VideoPrefetcher();
+    pf.setThrottled(true);
+    ensureAt(pf, 0);
+    await vi.waitFor(() => expect(pf.getStats().state).toBe('running'));
+    pf.stop();
+    pf.setThrottled(false);
+    await new Promise((resolve) => setTimeout(resolve, 550));
+    expect(segUrls).toHaveLength(0);
+    expect(pf.getStats().state).toBe('idle');
+    release();
+  });
+
   it('parsing 期间同锚点的第二次 ensure 不 abort 刚起跑的运行', async () => {
     const { m3u8Fetches, segUrls, release } = makePrefetcher({ gateM3u8Ms: 30, holdSegments: true });
     const pf = new VideoPrefetcher();

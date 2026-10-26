@@ -12,6 +12,8 @@
  * 安全基线：contextIsolation=true、nodeIntegration=false、窗口只加载 127.0.0.1。
  */
 
+const fs = require('node:fs');
+const { parseEnv } = require('node:util');
 const { app, BrowserWindow, dialog } = require('electron');
 const { spawn } = require('node:child_process');
 const net = require('node:net');
@@ -29,12 +31,12 @@ let serverProc = null;
 let mainWindow = null;
 
 /** 探测一个空闲的本地端口（listen(0) 让系统分配，随即释放） */
-function getFreePort() {
+function getFreePort(preferredPort = 0) {
   return new Promise((resolve, reject) => {
     const srv = net.createServer();
     srv.unref();
     srv.on('error', reject);
-    srv.listen(0, '127.0.0.1', () => {
+    srv.listen(preferredPort, '127.0.0.1', () => {
       const port = srv.address().port;
       srv.close(() => resolve(port));
     });
@@ -67,11 +69,23 @@ async function waitForServer(port, timeoutMs = 30000) {
 
 /** 启动 Next standalone server，返回其监听端口 */
 async function startServer() {
-  const port = await getFreePort();
+  const configDir = app.getPath('userData');
+  fs.mkdirSync(configDir, { recursive: true });
+  const portFile = path.join(configDir, 'server-port.json');
+  const savedPort = fs.existsSync(portFile) ? JSON.parse(fs.readFileSync(portFile, 'utf8')).port : 0;
+  if (!Number.isInteger(savedPort) || savedPort < 0 || savedPort > 65535) {
+    throw new Error(`Invalid desktop port configuration: ${portFile}`);
+  }
+  // A stable origin preserves IndexedDB/localStorage between desktop sessions.
+  const port = await getFreePort(savedPort);
+  fs.writeFileSync(portFile, JSON.stringify({ port }));
+  const envFile = path.join(configDir, '.env');
+  const runtimeEnv = fs.existsSync(envFile) ? parseEnv(fs.readFileSync(envFile, 'utf8')) : {};
   serverProc = spawn(process.execPath, [SERVER_JS], {
     cwd: serverDir(),
     env: {
       ...process.env,
+      ...runtimeEnv,
       PORT: String(port),
       HOSTNAME: '127.0.0.1',
       ELECTRON_RUN_AS_NODE: '1',

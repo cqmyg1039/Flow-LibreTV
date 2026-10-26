@@ -1,6 +1,7 @@
 import { parseM3u8Playlist, type ParsedPlaylist } from './m3u8-parse';
 import {
   buildSegmentCacheKey,
+  hasCachedSegment,
   loadCacheSettings,
   putCachedSegmentResilient,
   enforceQuota,
@@ -260,17 +261,24 @@ export class VideoPrefetcher {
     let cached = 0;
     let bytes = 0;
     let lastEvict = Date.now();
-    const concurrency = Math.min(options.concurrency ?? 3, 4);
+    const concurrency = Math.max(1, Math.min(options.concurrency ?? 1, 4));
 
     const worker = async (): Promise<void> => {
       while (cursor < taskQueue.length) {
         if (generation !== this.generation) return;
         await this.waitForResume(generation);
+        if (generation !== this.generation) return;
         const task = taskQueue[cursor++];
         if (!task) return;
         const key = buildSegmentCacheKey(task.url);
         const started = performance.now();
         try {
+          if (await hasCachedSegment(key)) {
+            cached += 1;
+            this.setState({ state: 'running', cached, total: taskQueue.length, bytes });
+            continue;
+          }
+          if (generation !== this.generation) return;
           const res = await fetch(task.url, { signal: this.abort.signal, headers: { Accept: '*/*' } });
           if (!res.ok) continue;
           const buffer = await res.arrayBuffer();
