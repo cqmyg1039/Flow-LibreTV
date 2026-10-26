@@ -60,7 +60,7 @@ for (const mod of ['bufferutil', 'utf-8-validate']) {
 }
 
 // 3. electron-builder 打包（NSIS 安装包）
-run('npx', ['electron-builder', '--win']);
+run('npx', ['electron-builder', '--win', '--publish', 'never']);
 
 // 4. 列出产物
 const releaseDir = path.join(root, 'release');

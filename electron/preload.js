@@ -1,12 +1,6 @@
 'use strict';
 
-/**
- * LibreTV 桌面版预加载脚本（contextIsolation 桥接，供页面读取桌面环境信息）。
- * 页面本身不依赖桌面能力，这里只提供基础元信息，保持安全基线：
- * 不开放 Node API、不暴露 ipcRenderer。
- */
-
-const { contextBridge } = require('electron');
+const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('desktop', {
   platform: process.platform,
@@ -15,5 +9,18 @@ contextBridge.exposeInMainWorld('desktop', {
     electron: process.versions.electron,
     chrome: process.versions.chrome,
     node: process.versions.node,
+  },
+});
+
+// 白名单桥接：不开放原始 IPC、Electron 事件或 Node API。
+contextBridge.exposeInMainWorld('libreUpdater', {
+  getState: () => ipcRenderer.invoke('updater:get-state'),
+  check: () => ipcRenderer.invoke('updater:check'),
+  download: () => ipcRenderer.invoke('updater:download'),
+  install: () => ipcRenderer.invoke('updater:install'),
+  onState: (callback) => {
+    const handler = (_event, state) => callback(state);
+    ipcRenderer.on('updater:state', handler);
+    return () => ipcRenderer.removeListener('updater:state', handler);
   },
 });

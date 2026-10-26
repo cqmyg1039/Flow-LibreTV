@@ -12,13 +12,17 @@
  * 安全基线：contextIsolation=true、nodeIntegration=false、窗口只加载 127.0.0.1。
  */
 
-const fs = require('node:fs');
-const { parseEnv } = require('node:util');
-const { app, BrowserWindow, dialog } = require('electron');
 const { spawn } = require('node:child_process');
-const net = require('node:net');
+const fs = require('node:fs');
 const http = require('node:http');
+const net = require('node:net');
 const path = require('node:path');
+const { parseEnv } = require('node:util');
+
+const { app, BrowserWindow, dialog } = require('electron');
+
+const { initAutoUpdater } = require('./auto-updater');
+const { stopServerProcess } = require('./server-lifecycle');
 
 /** standalone 产物目录：安装目录/resources/standalone */
 function serverDir() {
@@ -121,7 +125,12 @@ function createWindow(port) {
       preload: path.join(__dirname, 'preload.js'),
     },
   });
-  mainWindow.loadURL(`http://127.0.0.1:${port}`);
+  const origin = `http://127.0.0.1:${port}`;
+  mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    if (new URL(url).origin !== origin) event.preventDefault();
+  });
+  mainWindow.loadURL(origin);
   mainWindow.on('closed', () => {
     mainWindow = null;
   });
@@ -142,6 +151,11 @@ if (!app.requestSingleInstanceLock()) {
     try {
       const port = await startServer();
       createWindow(port);
+      initAutoUpdater({
+        getWindow: () => mainWindow,
+        origin: `http://127.0.0.1:${port}`,
+        stopServer: () => stopServerProcess(serverProc),
+      });
     } catch (err) {
       dialog.showErrorBox('LibreTV 启动失败', String((err && err.message) || err));
       app.quit();

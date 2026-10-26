@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Drawer } from './drawer';
+import { UpdaterSettings } from './updater';
 import { ConfirmDialog } from './confirm-dialog';
 import { Icon, type IconName } from './icon';
 import { LiveSourceManager } from './live-source-manager';
@@ -137,6 +138,7 @@ export function SourceManagerDrawer({ open, onClose }: { open: boolean; onClose:
       {current === 'home' && <HomePanel />}
       {current === 'subs' && <SourceSubscriptions />}
       {current === 'io' && <ConfigIoPanel />}
+      <UpdaterSettings />
     </Drawer>
   );
 }

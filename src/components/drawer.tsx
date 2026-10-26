@@ -102,6 +102,7 @@ export function Drawer({
         return;
       }
       if (e.key !== 'Tab') return;
+      if (document.querySelector('[role="alertdialog"]')) return;
       const panel = panelRef.current;
       if (!panel) return;
       const nodes = Array.from(panel.querySelectorAll<HTMLElement>(FOCUSABLE)).filter(
