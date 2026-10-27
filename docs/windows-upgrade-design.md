@@ -171,13 +171,14 @@ npm run desktop:release
 ### 8.2 上传草稿
 
 准备指向当前 HEAD 的 `v<version>` 标签并人工推送至 `github` remote，
-确认 GitHub CLI 已登录，并准备更新说明文件。然后显式执行：
+确认 GitHub CLI 已登录，然后直接传入一段更新说明：
 
 ```powershell
-npm run desktop:release -- --upload-draft docs/release-notes-2.19.8.md
+npm run desktop:release -- "修复安装包命名问题，优化播放体验"
 ```
 
-更新说明文件由发布者按实际改动准备；上述路径只是示例，不代表文件已经存在。
+文案请按实际改动填写，并用引号包裹。此命令只创建草稿，不会直接公开发布。
+仍兼容旧用法：`npm run desktop:release -- --upload-draft <更新说明文件>`。
 
 脚本会：
 
