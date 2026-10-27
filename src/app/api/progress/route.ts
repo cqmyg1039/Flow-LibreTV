@@ -51,7 +51,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       for (const p of body.progress) {
         await sql`insert into watch_progress
           (key, position, duration, updated_at)
-          values (${p.key}, ${p.position}, ${p.duration}, ${p.updatedAt})
+          values (${p.key}, ${Math.round(p.position)}, ${Math.round(p.duration)}, ${p.updatedAt})
           on conflict (key) do update set
             position = excluded.position,
             duration = excluded.duration,

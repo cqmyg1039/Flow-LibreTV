@@ -115,7 +115,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         await sql`insert into watch_history
           (id, source_key, source_url, vod_id, title, pic, episode_index, total_episodes, playback_position, duration, ts)
           values (${h.id}, ${h.sourceKey}, ${h.sourceUrl ?? null}, ${h.vodId}, ${h.title}, ${h.pic ?? null},
-                  ${h.episodeIndex}, ${h.totalEpisodes}, ${h.playbackPosition}, ${h.duration}, ${h.timestamp})
+                  ${Math.round(h.episodeIndex)}, ${Math.round(h.totalEpisodes)}, ${Math.round(h.playbackPosition)}, ${Math.round(h.duration)}, ${h.timestamp})
           on conflict (id) do update set
             source_key = excluded.source_key,
             source_url = excluded.source_url,
