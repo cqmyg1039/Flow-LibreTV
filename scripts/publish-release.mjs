@@ -38,8 +38,8 @@ function verifyRemote(release, tag) {
   if (existing) throw new Error('该版本草稿已存在，请人工检查后处理，避免覆盖未知附件');
 }
 
-/** 仅创建草稿，核验远端附件后提示人工发布；不自动公开版本。@param {object} release 发布参数 @param {string} notesFile 更新说明文件 */
-function uploadDraft(release, notesFile) {
+/** 仅创建草稿，核验远端附件后提示人工发布；不自动公开版本。@param {object} release 发布参数 @param {string} notes 更新说明文案 */
+function uploadDraft(release, notes) {
   const tag = `v${release.version}`;
   verifyGit(tag);
   verifyRemote(release, tag);
@@ -53,8 +53,8 @@ function uploadDraft(release, notesFile) {
     '--draft',
     '--title',
     `LibreTV ${release.version}`,
-    '--notes-file',
-    notesFile,
+    '--notes',
+    notes,
   ]);
   run('gh', ['release', 'upload', tag, '--repo', release.repo, ...release.files]);
   const assets = JSON.parse(
@@ -76,17 +76,29 @@ function uploadDraft(release, notesFile) {
   return tag;
 }
 
-/** 默认本地验证；--upload-draft 才上传，始终保留人工发布确认。@param {string[]} args CLI 参数 */
+/** 解析文案并兼容旧文件参数，拒绝空说明及未知选项。@param {string[]} args CLI 参数 */
+async function resolveNotes(args) {
+  if (!args.length) return null;
+  let notes;
+  if (args.length === 1 && !args[0].startsWith('-')) {
+    notes = args[0];
+  } else if (args.length === 2 && args[0] === '--upload-draft') {
+    notes = await readFile(path.resolve(ROOT, args[1]), 'utf8');
+  } else {
+    throw new Error('用法：npm run desktop:release -- "更新说明文案"');
+  }
+  if (!notes.trim()) throw new Error('更新说明不能为空');
+  return notes.trim();
+}
+
+/** 无参数只校验；传入文案创建草稿，始终保留人工发布确认。@param {string[]} args CLI 参数 */
 async function main(args) {
-  const upload = args[0] === '--upload-draft';
-  if (args.length && (!upload || args.length !== 2))
-    throw new Error('用法：npm run desktop:release [-- --upload-draft <更新说明文件>]');
+  const notes = await resolveNotes(args);
   const release = await validateRelease(ROOT);
   console.log(`产物校验通过：${release.repo} v${release.version}`);
-  if (!upload) return console.log('未上传。使用 --upload-draft <更新说明文件> 创建草稿。');
-  const notesFile = path.resolve(ROOT, args[1]);
-  if (!(await readFile(notesFile, 'utf8')).trim()) throw new Error('更新说明不能为空');
-  const tag = uploadDraft(release, notesFile);
+  if (notes === null)
+    return console.log('未上传。使用 npm run desktop:release -- "更新说明文案" 创建草稿。');
+  const tag = uploadDraft(release, notes);
   console.log(`草稿 ${tag} 三件套已上传。请人工检查附件、提交及更新说明后，在 GitHub 上发布。`);
 }
 

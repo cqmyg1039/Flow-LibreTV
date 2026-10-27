@@ -1,4 +1,4 @@
-"""兼容旧入口：委托安全发布脚本，默认只校验，显式 --upload-draft 才上传草稿。"""
+"""兼容旧入口：委托安全发布脚本，默认只校验，传入文案才上传草稿，兼容 --upload-draft 文件参数。"""
 
 import pathlib
 import subprocess

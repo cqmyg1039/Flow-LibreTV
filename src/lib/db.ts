@@ -147,6 +147,8 @@ export async function updateHistoryProgress(
   position: number,
   duration: number
 ): Promise<void> {
+  position = Math.round(position);
+  duration = Math.round(duration);
   const id = `${sourceKey}_${vodId}`;
   const existing = await db.history.get(id);
   if (!existing) return;
@@ -186,8 +188,8 @@ export async function saveProgress(sourceKey: string, vodId: string, episodeInde
   if (!duration || position < 1) return;
   const entry: ProgressEntry = {
     key: progressKeyOf(sourceKey, vodId, episodeIndex),
-    position,
-    duration,
+    position: Math.round(position),
+    duration: Math.round(duration),
     updatedAt: Date.now(),
   };
   await db.progress.put(entry);
