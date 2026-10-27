@@ -21,6 +21,11 @@ import { db, type HistoryEntry, type ProgressEntry } from './db';
 
 /** 云端未配置数据库（503）时标记为禁用：本会话不再发起同步，避免刷请求 */
 let disabled = false;
+let flushing: Promise<void> | null = null;
+let clearRevision = 0;
+let mutationRevision = 0;
+const QUEUE_STORAGE_KEY = 'libretv-history-sync-pending-v1';
+const RETRY_DELAY_MS = 30_000;
 
 /** 待推送队列（Map 按主键合并，同一记录只保留最新值） */
 const pendingHistory = new Map<string, HistoryEntry>();
@@ -38,6 +43,42 @@ let flushTimer: ReturnType<typeof setTimeout> | null = null;
 let maxWaitTimer: ReturnType<typeof setTimeout> | null = null;
 
 // —— 纯合并函数（供单测与 pull 使用） ——
+
+/** Persist pending operations without blocking local playback on storage failures. */
+function persistQueue(): void {
+  try {
+    localStorage.setItem(
+      QUEUE_STORAGE_KEY,
+      JSON.stringify({
+        history: [...pendingHistory.values()],
+        progress: [...pendingProgress.values()],
+        deleteHistory: [...pendingDeleteHistory],
+        deleteProgress: [...pendingDeleteProgress],
+        clearAll: pendingClearAll,
+      })
+    );
+  } catch {
+    // Keep the in-memory queue when storage is unavailable.
+  }
+}
+
+/** Restore operations left by the previous session from this origin's storage. */
+function restoreQueue(): void {
+  try {
+    const raw = localStorage.getItem(QUEUE_STORAGE_KEY);
+    if (!raw) return;
+    const data = JSON.parse(raw);
+    for (const entry of data.history ?? []) pendingHistory.set(entry.id, entry);
+    for (const entry of data.progress ?? []) pendingProgress.set(entry.key, entry);
+    for (const id of data.deleteHistory ?? []) pendingDeleteHistory.add(id);
+    for (const key of data.deleteProgress ?? []) pendingDeleteProgress.add(key);
+    pendingClearAll = data.clearAll === true;
+  } catch {
+    // Corrupt storage must not prevent access to local history.
+  }
+}
+
+restoreQueue();
 
 /**
  * 合并历史记录：id → 条目；remote 仅在「本地不存在」或「remote.timestamp 更新」时覆盖；
@@ -84,53 +125,51 @@ function clearTimers(): void {
 }
 
 function scheduleFlush(): void {
-  if (flushTimer) return;
+  mutationRevision += 1;
+  persistQueue();
+  if (disabled || flushTimer) return;
   flushTimer = setTimeout(() => void flushNow(), FLUSH_DEBOUNCE_MS);
   if (!maxWaitTimer) maxWaitTimer = setTimeout(() => void flushNow(), FLUSH_MAX_WAIT_MS);
 }
 
 function flushNow(): void {
   clearTimers();
-  void flush();
+  void flushHistorySync();
 }
 
 // —— 对外入口（db.ts 写点挂接） ——
 
 export function enqueueHistoryEntry(entry: HistoryEntry): void {
-  if (disabled) return;
   pendingHistory.set(entry.id, entry);
   pendingDeleteHistory.delete(entry.id);
   scheduleFlush();
 }
 
 export function enqueueProgressEntry(entry: ProgressEntry): void {
-  if (disabled) return;
   pendingProgress.set(entry.key, entry);
   pendingDeleteProgress.delete(entry.key);
   scheduleFlush();
 }
 
 export function enqueueHistoryDelete(id: string): void {
-  if (disabled) return;
   pendingHistory.delete(id);
   pendingDeleteHistory.add(id);
   scheduleFlush();
 }
 
 export function enqueueProgressDelete(key: string): void {
-  if (disabled) return;
   pendingProgress.delete(key);
   pendingDeleteProgress.add(key);
   scheduleFlush();
 }
 
 export function enqueueHistoryClear(): void {
-  if (disabled) return;
   pendingHistory.clear();
   pendingProgress.clear();
   pendingDeleteHistory.clear();
   pendingDeleteProgress.clear();
   pendingClearAll = true;
+  clearRevision += 1;
   scheduleFlush();
 }
 
@@ -139,19 +178,19 @@ export async function syncPull(opts?: { timeoutMs?: number }): Promise<boolean> 
   if (disabled) return false;
   try {
     const res = await fetchWithTimeout('/api/history', opts?.timeoutMs ?? PULL_TIMEOUT_MS);
-    if (res.status === 503) {
-      // 云端没配数据库：本会话不再尝试，本地照常用
-      disabled = true;
-      return false;
-    }
+    if (await isSyncDisabled(res)) return false;
     if (!res.ok) return false;
     const payload = (await res.json()) as { history?: HistoryEntry[]; progress?: ProgressEntry[] };
     const [localHistory, localProgress] = await Promise.all([
       db.history.toArray(),
       db.progress.toArray(),
     ]);
-    const mergedHistory = mergeHistoryEntries(localHistory, payload.history ?? [], pendingHistory.size > 0 ? new Set(pendingHistory.keys()) : new Set());
-    const mergedProgress = mergeProgressEntries(localProgress, payload.progress ?? [], pendingProgress.size > 0 ? new Set(pendingProgress.keys()) : new Set());
+    if (pendingClearAll) return true;
+    const remoteHistory = (payload.history ?? []).filter((entry) => !pendingDeleteHistory.has(entry.id));
+    const remoteProgress = (payload.progress ?? []).filter((entry) => !pendingDeleteProgress.has(entry.key));
+    enqueueLocalChanges(localHistory, localProgress, remoteHistory, remoteProgress);
+    const mergedHistory = mergeHistoryEntries(localHistory, remoteHistory, pendingHistory.size > 0 ? new Set(pendingHistory.keys()) : new Set());
+    const mergedProgress = mergeProgressEntries(localProgress, remoteProgress, pendingProgress.size > 0 ? new Set(pendingProgress.keys()) : new Set());
     await Promise.all([
       mergedHistory.length > 0 ? db.history.bulkPut(mergedHistory) : Promise.resolve(),
       mergedProgress.length > 0 ? db.progress.bulkPut(mergedProgress) : Promise.resolve(),
@@ -164,6 +203,45 @@ export async function syncPull(opts?: { timeoutMs?: number }): Promise<boolean> 
 
 // —— 内部：推送 ——
 
+/** Serialize requests so clears cannot overtake newer writes. */
+export function flushHistorySync(): Promise<void> {
+  if (flushing) return flushing;
+  flushing = flush().finally(() => {
+    flushing = null;
+    const hasPending = pendingHistory.size > 0 || pendingProgress.size > 0 ||
+      pendingDeleteHistory.size > 0 || pendingDeleteProgress.size > 0 || pendingClearAll;
+    if (!disabled && hasPending && !flushTimer) scheduleFlush();
+  });
+  return flushing;
+}
+
+/** Retry after authentication/network recovery and backfill local-only records. */
+export async function resumeHistorySync(): Promise<void> {
+  disabled = false;
+  await syncPull();
+  await flushHistorySync();
+}
+
+/** Queue only missing/newer local records, preserving pending deletions. */
+function enqueueLocalChanges(
+  history: HistoryEntry[], progress: ProgressEntry[],
+  remoteHistory: HistoryEntry[], remoteProgress: ProgressEntry[]
+): void {
+  const historyTimes = new Map(remoteHistory.map((entry) => [entry.id, entry.timestamp]));
+  const progressTimes = new Map(remoteProgress.map((entry) => [entry.key, entry.updatedAt]));
+  for (const entry of history) {
+    if (!pendingDeleteHistory.has(entry.id) && entry.timestamp > (historyTimes.get(entry.id) ?? -1)) {
+      if (!pendingHistory.has(entry.id)) pendingHistory.set(entry.id, entry);
+    }
+  }
+  for (const entry of progress) {
+    if (!pendingDeleteProgress.has(entry.key) && entry.updatedAt > (progressTimes.get(entry.key) ?? -1)) {
+      if (!pendingProgress.has(entry.key)) pendingProgress.set(entry.key, entry);
+    }
+  }
+  scheduleFlush();
+}
+
 async function flush(): Promise<void> {
   if (disabled) return;
   const hasHistoryOps = pendingHistory.size > 0 || pendingDeleteHistory.size > 0 || pendingClearAll;
@@ -174,6 +252,8 @@ async function flush(): Promise<void> {
   const deleteHistory = [...pendingDeleteHistory];
   const deleteProgress = [...pendingDeleteProgress];
   const clearAll = pendingClearAll;
+  const revision = clearRevision;
+  const mutations = mutationRevision;
 
   let historyOk = true;
   let progressOk = true;
@@ -185,29 +265,56 @@ async function flush(): Promise<void> {
       clearAll,
     });
   }
-  if (hasProgressOps) {
+  if (hasProgressOps && (!clearAll || historyOk)) {
     progressOk = await postJson('/api/progress', {
       progress: progressBatch,
       deleteProgress: clearAll ? undefined : deleteProgress,
     });
   }
 
+  if (clearAll && !historyOk) progressOk = false;
+  acknowledgeBatch(historyBatch, progressBatch, deleteHistory, deleteProgress, {
+    historyOk, progressOk, revision, mutations,
+  });
+  persistQueue();
+  if (!disabled && (!historyOk || !progressOk)) {
+    clearTimers();
+    flushTimer = setTimeout(() => flushNow(), RETRY_DELAY_MS);
+  }
+}
+
+/** Acknowledge only the snapshot sent, never newer edits queued during a request. */
+function acknowledgeBatch(
+  historyBatch: HistoryEntry[], progressBatch: ProgressEntry[],
+  deleteHistory: string[], deleteProgress: string[],
+  result: { historyOk: boolean; progressOk: boolean; revision: number; mutations: number }
+): void {
+  const { historyOk, progressOk, revision, mutations } = result;
   if (historyOk) {
-    pendingHistory.clear();
-    pendingDeleteHistory.clear();
+    for (const entry of historyBatch) {
+      if (pendingHistory.get(entry.id) === entry) pendingHistory.delete(entry.id);
+    }
+    if (mutations === mutationRevision) {
+      for (const id of deleteHistory) pendingDeleteHistory.delete(id);
+    }
   }
   if (progressOk) {
-    pendingProgress.clear();
-    pendingDeleteProgress.clear();
+    for (const entry of progressBatch) {
+      if (pendingProgress.get(entry.key) === entry) pendingProgress.delete(entry.key);
+    }
+    if (mutations === mutationRevision) {
+      for (const key of deleteProgress) pendingDeleteProgress.delete(key);
+    }
   }
-  if (historyOk && progressOk) pendingClearAll = false;
+  // The history endpoint clears both tables; do not repeat it after a progress-only failure.
+  if (historyOk && revision === clearRevision) pendingClearAll = false;
 }
 
 async function postJson(url: string, body: unknown): Promise<boolean> {
   if (disabled) return false;
   let res: Response;
   try {
-    res = await fetch(url, {
+    res = await fetchWithTimeout(url, 10_000, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -215,18 +322,23 @@ async function postJson(url: string, body: unknown): Promise<boolean> {
   } catch {
     return false; // 断网/网络错误：保留 pending，下次重试
   }
-  if (res.status === 503) {
-    disabled = true;
-    return false;
-  }
+  if (await isSyncDisabled(res)) return false;
   return res.ok;
 }
 
-async function fetchWithTimeout(url: string, timeoutMs: number): Promise<Response> {
+/** Only an explicit missing-database response disables sync, not an auth 503. */
+async function isSyncDisabled(res: Response): Promise<boolean> {
+  if (res.status !== 503) return false;
+  const payload = await res.clone().json().catch(() => null);
+  disabled = payload?.syncEnabled === false;
+  return disabled;
+}
+
+async function fetchWithTimeout(url: string, timeoutMs: number, init?: RequestInit): Promise<Response> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await fetch(url, { signal: controller.signal, cache: 'no-store' });
+    return await fetch(url, { ...init, signal: controller.signal, cache: 'no-store' });
   } finally {
     clearTimeout(timer);
   }

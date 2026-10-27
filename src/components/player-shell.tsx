@@ -5,7 +5,7 @@ import Artplayer from 'artplayer';
 import Hls, { type HlsConfig } from 'hls.js';
 
 import { PlaybackRecovery, describeHlsError } from '@/lib/playback-recovery';
-import { createHlsLoader } from '@/lib/hls-loader';
+import { buildPlaybackHlsConfig, bindPlaybackPrefetch } from '@/lib/playback-buffer';
 import {
   getVideoPrefetcher,
   getNextEpisodePrefetcher,
@@ -213,26 +213,8 @@ export function PlayerShell({
   // 片段缓存开启时调大 hls.js 自身缓冲，缓冲之外的空窗由预取器补齐
   const buildHlsConfig = (): Partial<HlsConfig> => {
     const p = propsRef.current;
-    const cacheSettings = loadCacheSettings();
-    const cacheEnabled = cacheSettings.enabled && !!p.episodeKey;
-    return {
-      debug: false,
-      enableWorker: true,
-      backBufferLength: 90,
-      maxBufferLength: cacheEnabled ? 120 : 30,
-      maxMaxBufferLength: cacheEnabled ? 600 : 60,
-      maxBufferSize: (cacheEnabled ? 90 : 30) * 1000 * 1000,
-      maxBufferHole: 0.5,
-      fragLoadingMaxRetry: 6,
-      fragLoadingRetryDelay: 1000,
-      manifestLoadingMaxRetry: 3,
-      manifestLoadingRetryDelay: 1000,
-      startLevel: -1,
-      abrEwmaDefaultEstimate: 500_000,
-      appendErrorMaxRetry: 5,
-      // 组合 loader：广告过滤（blockAd 随设置）+ 片段缓存命中（cacheEnabled）
-      loader: createHlsLoader(Hls, { blockAd: p.adFilter }) as unknown as HlsConfig['loader'],
-    };
+    const cacheEnabled = loadCacheSettings().enabled && !!p.episodeKey;
+    return buildPlaybackHlsConfig(p.adFilter, cacheEnabled);
   };
 
   // 当前集预取（episodeKey 缺省 = 关闭，见 ensure 内部 settings.enabled 判断）
@@ -411,6 +393,7 @@ export function PlayerShell({
     recoveryRef.current = new PlaybackRecovery();
     // 换集时清掉上一集的预取窗口，避免带宽被旧集占用
     getVideoPrefetcher().stop();
+    getNextEpisodePrefetcher().stop();
     setError('');
     setShowPoster(true);
     const art = artRef.current;
@@ -610,19 +593,9 @@ export function PlayerShell({
     art.on('video:seeked', () => {
       ensurePrefetch(currentMediaUrlRef.current, art.currentTime);
     });
-    art.on('video:pause', () => {
+    const unbindPrefetch = bindPlaybackPrefetch(art, () => {
       propsRef.current.onPause?.(art.currentTime, art.duration);
-      // 暂停 = 预取黄金窗口：解除限速并无限铺满整集（用户主动行为，带宽占用可接受）
-      // waiting 触发的限速在此解除，否则黄金窗口会被 500ms 轮询冻结
-      getVideoPrefetcher().setThrottled(false);
       ensurePrefetch(currentMediaUrlRef.current, art.currentTime, 0);
-    });
-    art.on('video:waiting', () => {
-      // 卡顿：预取临时让出带宽给播放
-      getVideoPrefetcher().setThrottled(true);
-    });
-    art.on('video:playing', () => {
-      getVideoPrefetcher().setThrottled(false);
     });
     art.on('video:ended', () => {
       endedRef.current = true;
@@ -778,6 +751,8 @@ export function PlayerShell({
       hlsRef.current = null;
       recoveryRef.current?.dispose();
       getVideoPrefetcher().stop();
+      getNextEpisodePrefetcher().stop();
+      unbindPrefetch();
       art.destroy();
       artRef.current = null;
     };

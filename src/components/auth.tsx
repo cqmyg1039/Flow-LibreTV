@@ -3,6 +3,7 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { api, onUnauthorized, STATUS_QUERY_KEY } from '@/lib/client-api';
+import { resumeHistorySync, flushHistorySync } from '@/lib/history-sync';
 import { applyEnvPresets } from '@/lib/subscription-sync';
 import type { AuthStatusResponse } from '@/lib/types';
 import { useToast } from './toast';
@@ -78,6 +79,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }),
     []
   );
+
+  // Resume pending sync after login/network recovery; flush before going to background.
+  useEffect(() => {
+    if (!verified) return;
+    const resume = () => { void resumeHistorySync(); };
+    const flush = () => { if (document.visibilityState === 'hidden') void flushHistorySync(); };
+    resume();
+    window.addEventListener('online', resume);
+    document.addEventListener('visibilitychange', flush);
+    return () => {
+      window.removeEventListener('online', resume);
+      document.removeEventListener('visibilitychange', flush);
+    };
+  }, [verified]);
 
   const openLogin = useCallback(() => setModalOpen(true), []);
 

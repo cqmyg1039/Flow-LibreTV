@@ -25,6 +25,26 @@ LibreTV Next.js 迁移版：免费在线视频聚合搜索与观看平台。基�
 - **首页推荐**：豆瓣（电影/剧集分类浏览）、Bangumi 新番放送表或影视榜单（豆瓣周榜 + 百度热播，经 60s API），设置中切换；均服务端直连 + 缓存，Bangumi/榜单免 key 免配置（`60S_API_BASE` 可指向自部署 60s 实例）
 - **PWA**：可安装到桌面 / 主屏幕，亮暗双主题无首屏闪烁
 
+## Windows 桌面版（Electron）
+
+免部署、双击即用的 Windows 桌面客户端：内置本地 Next standalone 服务，**无需安装 Node.js / Docker**，安装后直接使用。桌面版与网页版共用同一套代码与云端观看历史（Vercel Postgres / Neon）。
+
+- **下载**：GitHub Releases 页（本项目 Releases → 最新版 → `LibreTV Setup <版本>.exe`）
+- **使用**：安装后双击桌面快捷方式打开，输入访问密码（默认 `libretv`）即可搜索/播放；支持片头片尾跳过、历史跨设备同步等全部功能
+- **构建**（Windows 本机，需 Node.js 22+）：
+  ```bash
+  npm install
+  npm run desktop:build    # 产出 release/LibreTV Setup <版本>.exe（NSIS 安装包）
+  ```
+- **发布新版本**（推送到 GitHub 后）：
+  ```bash
+  npm run desktop:build && python scripts/create-release.py   # 自动创建 Release 并上传 exe
+  ```
+- **说明**：
+  - 首次运行 Windows Defender / SmartScreen 可能提示"未知发布者"，点「更多信息 → 仍要运行」即可（未购买代码签名证书，自用正常）；
+  - 安装包约 180 MB（内置 Chromium 内核）；启动即用，无需外网域名；
+  - 打包产物在 `release/` 目录（已 gitignore），发布脚本需 GitHub token（环境变量 `GH_TOKEN`）。
+
 ## 部署
 
 ### Docker（推荐）
