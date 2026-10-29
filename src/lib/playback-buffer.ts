@@ -1,7 +1,7 @@
 import type Artplayer from 'artplayer';
 import Hls, { type HlsConfig } from 'hls.js';
 
-import { createHlsLoader } from './hls-loader';
+import { createHlsLoader, type LoaderOptions } from './hls-loader';
 import { getNextEpisodePrefetcher, getVideoPrefetcher } from './video-prefetcher';
 
 const PREFETCH_BUFFER_SECONDS = 20;
@@ -18,7 +18,7 @@ export function bufferedAhead(buffered: TimeRanges, position: number): number {
 }
 
 /** Build VOD buffering options. Parameters control ad filtering and disk-cache capacity. */
-export function buildPlaybackHlsConfig(adFilter: boolean, cacheEnabled: boolean): Partial<HlsConfig> {
+export function buildPlaybackHlsConfig(adFilter: boolean, cacheEnabled: boolean, getCacheContext?: LoaderOptions['getCacheContext']): Partial<HlsConfig> {
   return {
     debug: false,
     enableWorker: true,
@@ -34,7 +34,7 @@ export function buildPlaybackHlsConfig(adFilter: boolean, cacheEnabled: boolean)
     startLevel: -1,
     abrEwmaDefaultEstimate: 500_000,
     appendErrorMaxRetry: 5,
-    loader: createHlsLoader(Hls, { blockAd: adFilter }) as unknown as HlsConfig['loader'],
+    loader: createHlsLoader(Hls, { blockAd: adFilter, getCacheContext }) as unknown as HlsConfig['loader'],
   };
 }
 

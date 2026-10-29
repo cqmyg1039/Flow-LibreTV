@@ -10,7 +10,8 @@ import {
   getVideoPrefetcher,
   getNextEpisodePrefetcher,
 } from '@/lib/video-prefetcher';
-import { loadCacheSettings } from '@/lib/video-cache';
+import { loadCacheSettings, setPlaybackCacheWindow } from '@/lib/video-cache';
+import { getPlaybackPlaylist, getPlaybackSegmentIndex, protectPlaybackCache } from '@/lib/playback-cache';
 import { formatTime } from '@/lib/utils';
 import { prefersTouchPointer } from '@/lib/touch-pointer';
 import { normalizeSkipPoints, shouldSkipOp, shouldTriggerEd, isInOpRange, skipZoneOf, type SkipZone } from '@/lib/skip-points';
@@ -214,26 +215,35 @@ export function PlayerShell({
   const buildHlsConfig = (): Partial<HlsConfig> => {
     const p = propsRef.current;
     const cacheEnabled = loadCacheSettings().enabled && !!p.episodeKey;
-    return buildPlaybackHlsConfig(p.adFilter, cacheEnabled);
+    return buildPlaybackHlsConfig(p.adFilter, cacheEnabled, (url) => {
+      const episodeKey = propsRef.current.episodeKey;
+      return episodeKey ? { episodeKey, index: getPlaybackSegmentIndex(hlsRef.current, url) } : undefined;
+    });
   };
 
   // 当前集预取（episodeKey 缺省 = 关闭，见 ensure 内部 settings.enabled 判断）
   const ensurePrefetch = (mediaUrl: string, currentTime: number, horizonSeconds?: number) => {
     const p = propsRef.current;
-    if (!p.episodeKey) return;
+    if (!p.episodeKey || mediaUrl !== currentMediaUrlRef.current) return;
+    protectPlaybackCache(hlsRef.current, p.episodeKey, currentTime);
+    const playlistUrl = getPlaybackPlaylist(hlsRef.current);
+    if (!playlistUrl) return; // 等待实际档位就绪，避免从 master 预取错误画质。
     getVideoPrefetcher().ensure({
-      m3u8Url: mediaUrl,
+      m3u8Url: playlistUrl,
+      adFilter: p.adFilter,
       currentTime,
       episodeKey: p.episodeKey,
       horizonSeconds,
       onProgress: (stats) => {
         // 当前集预取完成且存在下一集：用独立预取器预热下一集前 7 分钟
-        if (stats.state === 'done' && p.nextUrl && p.nextEpisodeKey) {
+        if (stats.state === 'done' && stats.cached === stats.total && p.nextUrl && p.nextEpisodeKey) {
           getNextEpisodePrefetcher().ensure({
             m3u8Url: p.nextUrl,
             currentTime: 0,
             episodeKey: p.nextEpisodeKey,
             horizonSeconds: 420,
+            adFilter: p.adFilter,
+            preferredHeight: hlsRef.current?.levels[hlsRef.current.currentLevel >= 0 ? hlsRef.current.currentLevel : hlsRef.current.loadLevel]?.height,
           });
         }
       },
@@ -250,6 +260,9 @@ export function PlayerShell({
     restoreCleanupRef.current = null;
     hlsRef.current?.destroy();
     currentMediaUrlRef.current = mediaUrl;
+    getVideoPrefetcher().stop();
+    getNextEpisodePrefetcher().stop();
+    setPlaybackCacheWindow();
     const hls = new Hls(buildHlsConfig());
     hlsRef.current = hls;
 
@@ -328,6 +341,10 @@ export function PlayerShell({
     hls.on(Hls.Events.LEVEL_LOADED, (_evt, data) => {
       const height = data.levelInfo?.height;
       if (typeof height === 'number') reportQuality(height);
+      if (restoredRef.current) ensurePrefetch(mediaUrl, video.currentTime);
+    });
+    hls.on(Hls.Events.LEVEL_SWITCHED, () => {
+      if (restoredRef.current) ensurePrefetch(mediaUrl, video.currentTime);
     });
     // 分片真正进入 MSE buffer 才算媒体恢复：此时视频轨可渲染，错误态可解除
     hls.on(Hls.Events.FRAG_BUFFERED, () => {
@@ -580,6 +597,7 @@ export function PlayerShell({
       const now = Date.now();
       if (now - lastSave > 5000) {
         lastSave = now;
+        if (propsRef.current.episodeKey) protectPlaybackCache(hlsRef.current, propsRef.current.episodeKey, art.currentTime);
         propsRef.current.onTimeUpdate?.(art.currentTime, art.duration);
       }
       // 每 30s 续跑一次前向预取窗口（ensure 幂等，窗口未覆盖足够余量才会重建）
@@ -752,6 +770,7 @@ export function PlayerShell({
       recoveryRef.current?.dispose();
       getVideoPrefetcher().stop();
       getNextEpisodePrefetcher().stop();
+      setPlaybackCacheWindow();
       unbindPrefetch();
       art.destroy();
       artRef.current = null;

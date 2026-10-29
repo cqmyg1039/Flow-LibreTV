@@ -1,25 +1,50 @@
 import { db } from './db';
 import { documentBaseURI } from './m3u8';
+import { planCacheEviction, type PlaybackCacheWindow } from './video-cache-policy';
 
-/**
- * 视频片段本地缓存层。
- *
- * 职责边界：Cache Storage 读写 + IndexedDB（Dexie segmentMeta 表）元数据 + 两轮 LRU 淘汰。
- * 不做任何与播放器状态相关的判断，因此预取循环可以在视频暂停、页面切到后台时继续工作。
- *
- * 为什么不用 Service Worker：
- *   1. 播放器本来就在替换 hls.js 的 loader（广告过滤 + 缓存命中），叠加 cache-first 零注册成本；
- *   2. 跨域片段经 SW 拦截拿到的是 opaque response，cache.put 存不了内容；
- *   3. 无 SW 也无跨域 opaque 问题：预取侧与 loader 侧对同一分片生成字节一致的 key（见下）。
- *
- * key 一致性是缓存命中的前提：hls.js loader 请求分片时的 context.url 与预取器
- * 解析出的分片地址，都必须经 `new URL()` 归一化（抹平默认端口/百分号编码差异）。
- * 播放列表走代理改写形式（/api/proxy?url=…）时分片也是**本站根相对串**，
- * 不带基址的 `new URL()` 会原样放过——必须锚到文档基址才与绝对形式收敛为同一个 key。
- */
-
+/** Cache Storage 分片与 IndexedDB 元数据；所有修改串行执行，失效版本阻止迟到写入。 */
 export const VIDEO_CACHE_NAME = 'libretv-video-v1';
 const META_FLUSH_DEBOUNCE_MS = 30_000;
+
+let revision = 0;
+let evictionVersion = 0;
+let mutationQueue: Promise<unknown> = Promise.resolve();
+let playbackWindow: PlaybackCacheWindow | undefined;
+const invalidationListeners = new Set<() => void>();
+
+/** 获取淘汰版本；完成窗口在分片被淘汰后必须重新检查。 */
+export function getCacheEvictionVersion(): number {
+  return evictionVersion;
+}
+
+/** 获取缓存版本；下载开始时捕获，关闭/清理后禁止旧结果写回。 */
+export function getCacheRevision(): number {
+  return revision;
+}
+
+/** 订阅生命周期失效；入参为停止后台任务的回调，返回取消订阅函数。 */
+export function onCacheInvalidated(listener: () => void): () => void {
+  invalidationListeners.add(listener);
+  return () => { invalidationListeners.delete(listener); };
+}
+
+/** 更新当前播放窗口；保护附近分片，较远的未来缓存可被播放请求置换。 */
+export function setPlaybackCacheWindow(window?: PlaybackCacheWindow): void {
+  playbackWindow = window;
+}
+
+/** 串行修改 Cache Storage 和元数据；失败不阻塞后续操作。 */
+function serializeMutation<T>(operation: () => Promise<T>): Promise<T> {
+  const result = mutationQueue.then(operation);
+  mutationQueue = result.catch(() => undefined);
+  return result;
+}
+
+/** 使在途缓存写入失效，并同步通知预取器停止。 */
+function invalidateCache(): void {
+  revision += 1;
+  for (const listener of invalidationListeners) listener();
+}
 
 export interface CacheSettings {
   enabled: boolean;
@@ -69,6 +94,7 @@ export function saveCacheSettings(next: Partial<CacheSettings>): CacheSettings {
   try {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(merged));
   } catch { /* 隐私模式等场景忽略 */ }
+  invalidateCache();
   return merged;
 }
 
@@ -130,93 +156,93 @@ export async function readCachedSegment(key: string): Promise<CachedFragment | n
 
 export type CachePutResult = 'ok' | 'quota' | 'failed';
 
-/** 写入分片：QuotaExceeded 时先触发两轮 LRU 淘汰再重试一次 */
-export async function putCachedSegmentResilient(
-  key: string,
-  buffer: ArrayBuffer,
-  opts: { episodeKey: string; index: number; costMs: number; settings: CacheSettings }
-): Promise<CachePutResult> {
-  const store = cacheStore();
-  if (!store) return 'failed';
-  const bytes = buffer.byteLength;
-  const put = async (): Promise<CachePutResult> => {
-    try {
-      const cache = await store.open(VIDEO_CACHE_NAME);
-      const headers = new Headers({ 'Content-Type': 'video/mp2t', 'Content-Length': String(bytes) });
-      await cache.put(key, new Response(buffer.slice(0), { headers }));
-      await db.segmentMeta.put({
-        key,
-        episodeKey: opts.episodeKey,
-        index: opts.index,
-        bytes,
-        costMs: Math.max(1, Math.round(opts.costMs)),
-        lastAccess: Date.now(),
-      });
-      return 'ok';
-    } catch (err) {
-      return err instanceof DOMException && err.name === 'QuotaExceededError' ? 'quota' : 'failed';
-    }
-  };
-
-  const first = await put();
-  if (first !== 'quota') return first;
-  await enforceQuota(opts.settings);
-  return put();
+export interface CacheWriteOptions {
+  episodeKey: string;
+  index: number;
+  costMs: number;
+  settings: CacheSettings;
+  revision?: number;
+  background?: boolean;
 }
 
-/**
- * 两轮 LRU 淘汰：
- * ① 按剧集分组，组内按 lastAccess 升序淘汰到单集上限以内；
- * ② 全局按 lastAccess 升序淘汰到总量上限以内。
- * 返回删除的分片数。Cache 条目与元数据并行删除，孤儿元数据顺带清理。
- */
-export async function enforceQuota(settings?: CacheSettings): Promise<number> {
-  const conf = settings ?? loadCacheSettings();
-  const store = cacheStore();
-  if (!store) return 0;
-  try {
-    const cache = await store.open(VIDEO_CACHE_NAME);
-    const metas = await db.segmentMeta.toArray();
-    let removed = 0;
-
-    const remove = async (key: string) => {
-      await cache.delete(key);
-      await db.segmentMeta.delete(key);
-      removed += 1;
-    };
-
-    // ① 单集上限
-    const byEpisode = new Map<string, typeof metas>();
-    for (const m of metas) {
-      const list = byEpisode.get(m.episodeKey) ?? [];
-      list.push(m);
-      byEpisode.set(m.episodeKey, list);
-    }
-    for (const list of byEpisode.values()) {
-      let bytes = list.reduce((sum, m) => sum + m.bytes, 0);
-      if (bytes <= conf.maxBytesPerEpisode) continue;
-      const sorted = [...list].sort((a, b) => a.lastAccess - b.lastAccess);
-      for (const m of sorted) {
-        if (bytes <= conf.maxBytesPerEpisode) break;
-        bytes -= m.bytes;
-        await remove(m.key);
-      }
-    }
-
-    // ② 全局上限
-    let total = (await db.segmentMeta.toArray()).reduce((sum, m) => sum + m.bytes, 0);
-    if (total > conf.maxTotalBytes) {
-      const sorted = (await db.segmentMeta.toArray()).sort((a, b) => a.lastAccess - b.lastAccess);
-      for (const m of sorted) {
-        if (total <= conf.maxTotalBytes) break;
-        total -= m.bytes;
-        await remove(m.key);
-      }
-    }
-    return removed;
-  } catch {
-    return 0;
+/** 删除分片及元数据；入参为已打开的缓存和待删 key。 */
+async function removeSegments(cache: Cache, keys: string[]): Promise<void> {
+  if (keys.length) evictionVersion += 1;
+  for (const key of keys) {
+    await cache.delete(key);
+    await db.segmentMeta.delete(key);
+    touchTimers.delete(key);
   }
+}
+
+/** 单次队列内写入；元数据失败时回滚分片，避免不可统计的孤儿缓存。 */
+async function writeSegment(cache: Cache, key: string, buffer: ArrayBuffer, opts: CacheWriteOptions): Promise<void> {
+  await cache.put(key, new Response(buffer));
+  try {
+    await db.segmentMeta.put({
+      key, episodeKey: opts.episodeKey, index: opts.index, bytes: buffer.byteLength,
+      costMs: Math.max(1, Math.round(opts.costMs)), lastAccess: Date.now(),
+    });
+  } catch (error) {
+    await cache.delete(key);
+    throw error;
+  }
+}
+
+/** 为新分片预留空间；背景预取不得驱逐当前集未播放内容，空间不足即停止扩窗。 */
+async function reserveSpace(cache: Cache, key: string, bytes: number, opts: CacheWriteOptions, forceBytes = 0): Promise<boolean> {
+  const metas = await db.segmentMeta.toArray();
+  const plan = planCacheEviction(metas, opts.settings, playbackWindow, {
+    key, bytes, episodeKey: opts.episodeKey, background: opts.background, forceBytes,
+  });
+  if (!plan.fits) return false;
+  await removeSegments(cache, plan.keys);
+  return true;
+}
+
+/** 写入前预留预算；revision 为下载开始版本，QuotaExceeded 时额外释放实际字节。 */
+export function putCachedSegmentResilient(key: string, buffer: ArrayBuffer, opts: CacheWriteOptions): Promise<CachePutResult> {
+  const expectedRevision = opts.revision ?? revision;
+  return serializeMutation(async () => {
+    const store = cacheStore();
+    if (!store || expectedRevision !== revision || !loadCacheSettings().enabled) return 'failed';
+    try {
+      const cache = await store.open(VIDEO_CACHE_NAME);
+      if (!(await reserveSpace(cache, key, buffer.byteLength, opts))) return 'quota';
+      if (expectedRevision !== revision) return 'failed';
+      try {
+        await writeSegment(cache, key, buffer, opts);
+      } catch (error) {
+        if (!(error instanceof DOMException) || error.name !== 'QuotaExceededError') throw error;
+        if (!(await reserveSpace(cache, key, buffer.byteLength, opts, buffer.byteLength))) return 'quota';
+        await writeSegment(cache, key, buffer, opts);
+      }
+      if (expectedRevision !== revision) {
+        await removeSegments(cache, [key]);
+        return 'failed';
+      }
+      return 'ok';
+    } catch (error) {
+      return error instanceof DOMException && error.name === 'QuotaExceededError' ? 'quota' : 'failed';
+    }
+  });
+}
+
+/** 串行配额收敛；共享播放窗口优先级，不与写入或清理竞争。 */
+export function enforceQuota(settings?: CacheSettings): Promise<number> {
+  return serializeMutation(async () => {
+    const store = cacheStore();
+    if (!store) return 0;
+    try {
+      const cache = await store.open(VIDEO_CACHE_NAME);
+      const metas = await db.segmentMeta.toArray();
+      const plan = planCacheEviction(metas, settings ?? loadCacheSettings(), playbackWindow);
+      await removeSegments(cache, plan.keys);
+      return plan.keys.length;
+    } catch {
+      return 0;
+    }
+  });
 }
 
 /** 命中/读取时刷新 lastAccess；30s 内同 key 只写一次，避免高频写放大 */
@@ -251,22 +277,24 @@ export async function getCacheSummary(): Promise<CacheSummary> {
   }
 }
 
-export async function clearVideoCache(): Promise<void> {
-  const store = cacheStore();
-  try {
+/** 清理前使下载失效；等待旧写入完成后删除，禁止旧任务重新填充。 */
+export function clearVideoCache(): Promise<void> {
+  invalidateCache();
+  return serializeMutation(async () => {
+    const store = cacheStore();
     if (store) await store.delete(VIDEO_CACHE_NAME);
     await db.segmentMeta.clear();
-  } catch { /* 忽略 */ }
+    touchTimers.clear();
+  });
 }
 
-export async function deleteEpisodeCache(episodeKey: string): Promise<void> {
-  const store = cacheStore();
-  try {
+/** 删除指定集；使旧预取失效后串行删除，避免清理期间重新写入。 */
+export function deleteEpisodeCache(episodeKey: string): Promise<void> {
+  invalidateCache();
+  return serializeMutation(async () => {
+    const store = cacheStore();
     const metas = await db.segmentMeta.where('episodeKey').equals(episodeKey).toArray();
-    if (store) {
-      const cache = await store.open(VIDEO_CACHE_NAME);
-      await Promise.all(metas.map((m) => cache.delete(m.key)));
-    }
-    await db.segmentMeta.bulkDelete(metas.map((m) => m.key));
-  } catch { /* 忽略 */ }
+    if (store) await removeSegments(await store.open(VIDEO_CACHE_NAME), metas.map((meta) => meta.key));
+    else await db.segmentMeta.bulkDelete(metas.map((meta) => meta.key));
+  });
 }

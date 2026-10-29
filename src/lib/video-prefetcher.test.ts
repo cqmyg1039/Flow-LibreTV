@@ -1,13 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { computeWindow, indexAtTime, VideoPrefetcher } from './video-prefetcher';
-import { buildSegmentCacheKey, clearVideoCache } from './video-cache';
+import { buildSegmentCacheKey, clearVideoCache, saveCacheSettings } from './video-cache';
 import { parseM3u8Playlist } from './m3u8-parse';
 import { rewriteM3u8 } from './m3u8';
+import * as videoCache from './video-cache';
+
+vi.mock('./db', () => ({ db: { segmentMeta: {
+  clear: vi.fn().mockResolvedValue(undefined),
+  toArray: vi.fn().mockResolvedValue([]),
+} } }));
 
 afterEach(async () => {
   vi.unstubAllGlobals();
   vi.useRealTimers();
   await clearVideoCache();
+  vi.restoreAllMocks();
 });
 
 describe('computeWindow', () => {
@@ -98,6 +105,65 @@ describe('VideoPrefetcher.ensure 幂等', () => {
     pf.ensure({ m3u8Url: M3U8_URL, currentTime, episodeKey: 's:v:0', horizonSeconds: 300 });
   }
 
+  it('immediately stops active prefetch when settings are disabled', async () => {
+    const values = new Map<string, string>();
+    vi.stubGlobal('localStorage', { getItem: (key: string) => values.get(key), setItem: (key: string, value: string) => values.set(key, value) });
+    const { segUrls, release } = makePrefetcher({ holdSegments: true });
+    const pf = new VideoPrefetcher();
+    ensureAt(pf, 0);
+    await vi.waitFor(() => expect(segUrls).toHaveLength(1));
+    saveCacheSettings({ enabled: false });
+    expect(pf.getStats().state).toBe('idle');
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(segUrls).toHaveLength(1);
+  });
+
+  it('reparses on ad filtering changes and forwards the selected filter policy', async () => {
+    const { m3u8Fetches, release } = makePrefetcher();
+    const pf = new VideoPrefetcher();
+    ensureAt(pf, 0);
+    await vi.waitFor(() => expect(pf.getStats().state).toBe('done'));
+    pf.ensure({ m3u8Url: M3U8_URL, currentTime: 0, episodeKey: 's:v:0', adFilter: false });
+    await vi.waitFor(() => expect(m3u8Fetches).toHaveBeenCalledTimes(2));
+    pf.stop();
+    release();
+  });
+
+  it('reuses fully cached windows beyond the retry delay without another cache scan', async () => {
+    const { m3u8Fetches, release } = makePrefetcher();
+    const probe = vi.spyOn(videoCache, 'hasCachedSegment').mockResolvedValue(true);
+    const pf = new VideoPrefetcher();
+    ensureAt(pf, 0);
+    await vi.waitFor(() => expect(pf.getStats().state).toBe('done'));
+    const scans = probe.mock.calls.length;
+    expect(pf.getStats().cached).toBe(pf.getStats().total);
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 60_000);
+    ensureAt(pf, 10);
+    await Promise.resolve();
+    expect(m3u8Fetches).toHaveBeenCalledOnce();
+    expect(probe).toHaveBeenCalledTimes(scans);
+    pf.stop();
+    release();
+  });
+
+  it('clearing aborts a playlist request and prevents late segment downloads', async () => {
+    let signal: AbortSignal | undefined;
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
+      signal = init?.signal ?? undefined;
+      return new Promise<Response>((_resolve, reject) => {
+        signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true });
+      });
+    }));
+    const pf = new VideoPrefetcher();
+    ensureAt(pf, 0);
+    await vi.waitFor(() => expect(signal).toBeDefined());
+    await clearVideoCache();
+    expect(signal?.aborted).toBe(true);
+    expect(pf.getStats().state).toBe('idle');
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
   it('defaults to one in-flight background segment request', async () => {
     const { segUrls, release } = makePrefetcher({ holdSegments: true });
     const pf = new VideoPrefetcher();
@@ -151,15 +217,15 @@ describe('VideoPrefetcher.ensure 幂等', () => {
     expect(m3u8Fetches).toHaveBeenCalledTimes(2);
 
     await vi.waitFor(() => expect(pf.getStats().state).toBe('running'));
-    // 新窗口自 600 - 30（回看）= 570s 起，即第 114 片
-    expect(segUrls[0]).toBe(segUrl(114));
+    // 优先下载播放头 600s 处第 120 片，再补回看窗口。
+    expect(segUrls[0]).toBe(segUrl(120));
 
     pf.stop();
     release();
   });
 
   it('running 状态的前向余量按最新播放头判定，不按建窗时的旧值', async () => {
-    const { m3u8Fetches, release } = makePrefetcher({ holdSegments: true });
+    const { m3u8Fetches, segUrls, release } = makePrefetcher({ holdSegments: true });
     const pf = new VideoPrefetcher();
 
     ensureAt(pf, 0);
@@ -172,13 +238,14 @@ describe('VideoPrefetcher.ensure 幂等', () => {
 
     // 播放头 260s：余量不足 60s → 必须重建（按建窗时的 0s 判定会永远判「够用」）
     ensureAt(pf, 260);
-    expect(m3u8Fetches).toHaveBeenCalledTimes(2);
+    expect(m3u8Fetches).toHaveBeenCalledTimes(1); // 重建窗口复用清单
+    await vi.waitFor(() => expect(segUrls).toContain(segUrl(52)));
 
     pf.stop();
     release();
   });
 
-  it('done 状态的重复 ensure 按设计重建；换集必重建', async () => {
+  it('done 状态复用窗口与清单；换集重建队列', async () => {
     const { m3u8Fetches, release } = makePrefetcher();
     const pf = new VideoPrefetcher();
 
@@ -186,15 +253,15 @@ describe('VideoPrefetcher.ensure 幂等', () => {
     await vi.waitFor(() => expect(pf.getStats().state).toBe('done'));
     expect(m3u8Fetches).toHaveBeenCalledTimes(1);
 
-    // done 后的 ensure 会重查覆盖并重建（分片已缓存的拉取在 loader 侧命中）
+    // done 后窗口仍覆盖当前位置时，既不拉清单也不重新扫描分片。
     ensureAt(pf, 0);
     await vi.waitFor(() => expect(pf.getStats().state).toBe('done'));
-    expect(m3u8Fetches).toHaveBeenCalledTimes(2);
+    expect(m3u8Fetches).toHaveBeenCalledTimes(1);
 
     // 换集：descriptor 不同 → 必须重建
     pf.ensure({ m3u8Url: M3U8_URL, currentTime: 0, episodeKey: 's:v:1', horizonSeconds: 300 });
     await vi.waitFor(() => expect(pf.getStats().state).toBe('done'));
-    expect(m3u8Fetches).toHaveBeenCalledTimes(3);
+    expect(m3u8Fetches).toHaveBeenCalledTimes(2);
     release();
   });
 });
